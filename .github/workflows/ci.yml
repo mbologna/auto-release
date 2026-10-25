@@ -1,0 +1,48 @@
+name: CI
+
+"on":
+  push:
+    branches: ["**"]
+    tags: ["v*.*.*"]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+  security-events: write
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: ShellCheck
+        run: shellcheck -s sh bin/auto-release
+
+      # The test stage runs bats inside the image, with the git-cliff and
+      # crane versions that releases will use.
+      - name: Tests
+        run: docker build --target test .
+
+  docker:
+    needs: test
+    uses: mbologna/.github/.github/workflows/docker-ci.yml@83a94cc1bdc464afe31abb9cb99a575e5a8a38ef # main
+    with:
+      image_name: auto-release
+      push_to_dockerhub: false
+      enable_cosign: true
+      enable_release_drafter: true
+    secrets: inherit

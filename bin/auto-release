@@ -1,0 +1,381 @@
+#!/bin/sh
+# auto-release: tag the next semantic version and publish a forge Release with
+# grouped notes, without a release pull request. Runs the same way on GitHub
+# Actions, GitLab CI and Forgejo Actions; see README.md.
+#
+#   auto-release plan       print the next version and its notes, change nothing
+#   auto-release release    plan, then push the tag and create the Release
+#
+# Configuration comes from the environment (CI jobs set it from their inputs):
+#   AUTO_RELEASE_STRATEGY            commits (default) | conventional | docker
+#   AUTO_RELEASE_IMAGE               docker: image to compare (GitLab: $CI_REGISTRY_IMAGE)
+#   AUTO_RELEASE_BASE_IMAGE_PATTERN  egrep pattern; matching Dockerfile lines go into the notes
+#   AUTO_RELEASE_TOKEN               token that pushes the tag and creates the Release
+#                                    (GitHub/Forgejo fall back to GITHUB_TOKEN)
+#   AUTO_RELEASE_DISPATCH            false: do not start the tag build (GitHub/Forgejo)
+#   AUTO_RELEASE_DISPATCH_WORKFLOW   workflow file to start on the tag (GitHub defaults
+#                                    to the caller of the running workflow)
+#   AUTO_RELEASE_CONFIG              git-cliff config (default ./cliff.toml, else bundled)
+#   AUTO_RELEASE_FORGE               github | gitlab | forgejo | none (default: detected)
+#   AUTO_RELEASE_DRY_RUN             true: same as the plan command
+set -eu
+
+TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+$'
+SHARE_DIR=${AUTO_RELEASE_SHARE_DIR:-$(cd "$(dirname "$0")/../share/auto-release" && pwd)}
+
+log() { printf '%s\n' "$*" >&2; }
+die() { log "auto-release: $*"; exit 1; }
+
+usage() {
+	sed -n '2,/^set -eu$/{/^set -eu$/d;s/^# \{0,1\}//;p;}' "$0"
+	exit "${1:-0}"
+}
+
+is_true() { case ${1:-} in true | 1 | yes) return 0 ;; *) return 1 ;; esac; }
+
+# Calls a forge API. curl's --fail-with-body keeps the error body, which says
+# why (missing scope, tag already released) far better than the status code.
+api() {
+	method=$1 url=$2 auth=$3 body=${4:-}
+	if [ -n "$body" ]; then
+		printf '%s' "$body" | curl -sS --fail-with-body --retry 3 -X "$method" \
+			-H "$auth" -H 'Content-Type: application/json' -H 'Accept: application/json' \
+			--data @- "$url"
+	else
+		curl -sS --fail-with-body --retry 3 -X "$method" -H "$auth" -H 'Accept: application/json' "$url"
+	fi
+}
+
+# --- forge adapters ----------------------------------------------------------
+# Each forge sets: FORGE_TOKEN, PUSH_URL, COMMIT_URL, COMPARE_URL (prefixes) and
+# implements forge_release TAG NOTES_FILE and forge_dispatch TAG.
+
+detect_forge() {
+	if [ -n "${AUTO_RELEASE_FORGE:-}" ]; then
+		printf '%s' "$AUTO_RELEASE_FORGE"
+	elif is_true "${FORGEJO_ACTIONS:-}" || is_true "${GITEA_ACTIONS:-}"; then
+		# Before GITHUB_ACTIONS: Forgejo's runner sets that too.
+		printf forgejo
+	elif is_true "${GITHUB_ACTIONS:-}"; then
+		printf github
+	elif is_true "${GITLAB_CI:-}"; then
+		printf gitlab
+	else
+		printf none
+	fi
+}
+
+# Host part of a URL, for an authenticated push URL.
+url_host() { printf '%s' "$1" | sed -E 's|^[a-z]+://||; s|/.*$||'; }
+
+setup_github() {
+	FORGE_TOKEN=${AUTO_RELEASE_TOKEN:-${GITHUB_TOKEN:-}}
+	server=${GITHUB_SERVER_URL:-https://github.com}
+	repo=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}
+	FORGE_API=${GITHUB_API_URL:-https://api.github.com}
+	PUSH_URL="https://x-access-token:${FORGE_TOKEN}@$(url_host "$server")/${repo}.git"
+	COMMIT_URL="${server}/${repo}/commit/"
+	COMPARE_URL="${server}/${repo}/compare/"
+	REGISTRY_LOGIN="ghcr.io x-access-token"
+}
+
+setup_forgejo() {
+	FORGE_TOKEN=${AUTO_RELEASE_TOKEN:-${GITHUB_TOKEN:-}}
+	server=${GITHUB_SERVER_URL:?GITHUB_SERVER_URL is not set}
+	repo=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}
+	FORGE_API="${server}/api/v1"
+	PUSH_URL="https://x-access-token:${FORGE_TOKEN}@$(url_host "$server")/${repo}.git"
+	COMMIT_URL="${server}/${repo}/commit/"
+	COMPARE_URL="${server}/${repo}/compare/"
+	REGISTRY_LOGIN="$(url_host "$server") x-access-token"
+}
+
+setup_gitlab() {
+	FORGE_TOKEN=${AUTO_RELEASE_TOKEN:-}
+	FORGE_API=${CI_API_V4_URL:?CI_API_V4_URL is not set}
+	PUSH_URL="${CI_SERVER_PROTOCOL:-https}://oauth2:${FORGE_TOKEN}@${CI_SERVER_FQDN:-${CI_SERVER_HOST:?}}/${CI_PROJECT_PATH:?}.git"
+	COMMIT_URL="${CI_PROJECT_URL:?}/-/commit/"
+	COMPARE_URL="${CI_PROJECT_URL}/-/compare/"
+	AUTO_RELEASE_IMAGE=${AUTO_RELEASE_IMAGE:-${CI_REGISTRY_IMAGE:-}}
+	REGISTRY_LOGIN=""
+	# The job token reads the project's own registry; no API scope needed.
+	if [ -n "${CI_REGISTRY:-}" ] && [ -n "${CI_JOB_TOKEN:-}" ]; then
+		REGISTRY_LOGIN="$CI_REGISTRY gitlab-ci-token"
+		REGISTRY_PASSWORD=$CI_JOB_TOKEN
+	fi
+}
+
+setup_none() {
+	FORGE_TOKEN="" PUSH_URL="" COMMIT_URL="" COMPARE_URL="" REGISTRY_LOGIN=""
+}
+
+release_json() {
+	jq -cn --arg tag "$1" --rawfile body "$2" \
+		'{tag_name: $tag, name: $tag, body: $body, draft: false, prerelease: false}'
+}
+
+forge_release() {
+	case $FORGE in
+	github)
+		api POST "${FORGE_API}/repos/${GITHUB_REPOSITORY}/releases" \
+			"Authorization: Bearer ${FORGE_TOKEN}" "$(release_json "$1" "$2")" >/dev/null
+		;;
+	forgejo)
+		api POST "${FORGE_API}/repos/${GITHUB_REPOSITORY}/releases" \
+			"Authorization: token ${FORGE_TOKEN}" "$(release_json "$1" "$2")" >/dev/null
+		;;
+	gitlab)
+		api POST "${FORGE_API}/projects/${CI_PROJECT_ID:?}/releases" \
+			"PRIVATE-TOKEN: ${FORGE_TOKEN}" \
+			"$(jq -cn --arg tag "$1" --rawfile body "$2" '{tag_name: $tag, name: $tag, description: $body}')" >/dev/null
+		;;
+	esac
+}
+
+# The workflow file to start on the new tag. In a reusable GitHub workflow
+# GITHUB_WORKFLOW_REF names the caller: owner/repo/.github/workflows/ci.yml@ref.
+dispatch_workflow() {
+	wf=${AUTO_RELEASE_DISPATCH_WORKFLOW:-${GITHUB_WORKFLOW_REF:-}}
+	wf=${wf%@*}
+	printf '%s' "${wf##*/}"
+}
+
+# A tag pushed with GitHub's GITHUB_TOKEN starts no workflow run (Forgejo's
+# automatic token behaves the same), so start the tag build explicitly;
+# workflow_dispatch is the one event those tokens may trigger. GitLab needs
+# nothing: a tag pushed with a personal or project token runs a pipeline.
+forge_dispatch() {
+	is_true "${AUTO_RELEASE_DISPATCH:-true}" || return 0
+	case $FORGE in github | forgejo) ;; *) return 0 ;; esac
+	wf=$(dispatch_workflow)
+	if [ -z "$wf" ]; then
+		log "No workflow to dispatch on $1 (set AUTO_RELEASE_DISPATCH_WORKFLOW); skipping."
+		return 0
+	fi
+	if [ "$FORGE" = github ]; then
+		auth="Authorization: Bearer ${FORGE_TOKEN}"
+	else
+		auth="Authorization: token ${FORGE_TOKEN}"
+	fi
+	api POST "${FORGE_API}/repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/dispatches" \
+		"$auth" "$(jq -cn --arg ref "$1" '{ref: $ref}')" >/dev/null
+	log "Dispatched ${wf} on $1"
+}
+
+# --- planning ----------------------------------------------------------------
+
+latest_tag() {
+	git tag --list 'v*.*.*' --sort=-version:refname | grep -E "$TAG_PATTERN" | head -n 1 || true
+}
+
+bump() { # VERSION(without v) KIND
+	major=${1%%.*} rest=${1#*.}
+	minor=${rest%%.*} patch=${rest#*.}
+	case $2 in
+	major) printf 'v%s.0.0' "$((major + 1))" ;;
+	minor) printf 'v%s.%s.0' "$major" "$((minor + 1))" ;;
+	patch) printf 'v%s.%s.%s' "$major" "$minor" "$((patch + 1))" ;;
+	esac
+}
+
+# conventional: only commits that change the version for a user count, the same
+# set release-please releases for. docs/chore/ci/test/refactor alone do not.
+has_releasable_commits() {
+	git log "$1..HEAD" --no-merges --format='%s%n%b' |
+		grep -qE '^(feat|fix|perf|revert)(\([^)]*\))?!?:|^[a-zA-Z]+(\([^)]*\))?!:|^BREAKING[ -]CHANGE:'
+}
+
+image_digest() {
+	crane digest "$1" 2>/dev/null || true
+}
+
+registry_login() {
+	[ -n "${REGISTRY_LOGIN:-}" ] || return 0
+	registry=${REGISTRY_LOGIN% *} user=${REGISTRY_LOGIN#* }
+	password=${REGISTRY_PASSWORD:-$FORGE_TOKEN}
+	case $AUTO_RELEASE_IMAGE in "$registry"/*) ;; *) return 0 ;; esac
+	[ -n "$password" ] || return 0
+	printf '%s' "$password" | crane auth login "$registry" -u "$user" --password-stdin >/dev/null 2>&1 ||
+		log "warning: could not log in to $registry; trying anonymously"
+}
+
+cliff_config() {
+	if [ -n "${AUTO_RELEASE_CONFIG:-}" ]; then
+		printf '%s' "$AUTO_RELEASE_CONFIG"
+	elif [ -f cliff.toml ]; then
+		printf cliff.toml
+	else
+		printf '%s/cliff.toml' "$SHARE_DIR"
+	fi
+}
+
+cliff() {
+	AUTO_RELEASE_COMMIT_URL=$COMMIT_URL NO_COLOR=1 GIT_CLIFF_OFFLINE=true \
+		git-cliff --config "$(cliff_config)" --tag-pattern "$TAG_PATTERN" "$@"
+}
+
+# Sets NEEDED, NEXT_TAG, NOTES_FILE.
+plan() {
+	NEEDED=false NEXT_TAG="" DIGEST_NOTE=""
+	LATEST_TAG=$(latest_tag)
+	if [ -z "$LATEST_TAG" ]; then
+		log "No vX.Y.Z tag found: push an initial tag by hand to bootstrap. Skipping."
+		return 0
+	fi
+	log "Latest tag: $LATEST_TAG"
+	version=${LATEST_TAG#v}
+	count=$(git rev-list --count "${LATEST_TAG}..HEAD")
+	log "Commits since $LATEST_TAG: $count"
+
+	case $STRATEGY in
+	commits)
+		[ "$count" -gt 0 ] && NEEDED=true
+		;;
+	conventional)
+		if [ "$count" -gt 0 ] && has_releasable_commits "$LATEST_TAG"; then
+			NEEDED=true
+		elif [ "$count" -gt 0 ]; then
+			log "No feat/fix/perf/revert or breaking commit since $LATEST_TAG."
+		fi
+		;;
+	docker)
+		[ -n "${AUTO_RELEASE_IMAGE:-}" ] || die "the docker strategy needs AUTO_RELEASE_IMAGE"
+		registry_login
+		tagged=$(image_digest "${AUTO_RELEASE_IMAGE}:${version}")
+		latest=$(image_digest "${AUTO_RELEASE_IMAGE}:latest")
+		log "Tagged (${version}) digest : ${tagged:-not found}"
+		log "Latest              digest : ${latest:-not found}"
+		# A missing version tag means the build that should have published it
+		# failed, so latest already holds newer content.
+		if [ -n "$latest" ] && [ "$tagged" != "$latest" ]; then
+			NEEDED=true
+			DIGEST_NOTE="Image digest changed: \`${latest}\`"
+		fi
+		;;
+	*) die "unknown strategy '$STRATEGY' (commits, conventional or docker)" ;;
+	esac
+
+	if [ "$NEEDED" != true ]; then
+		log "No release needed."
+		return 0
+	fi
+
+	# docker has no commit range to classify, so it always stays patch. For the
+	# others git-cliff applies the Conventional Commit rules; when every commit
+	# is one the config skips (merges, chore(release)) it reports no bump, and
+	# a commit still landed, so release a patch.
+	if [ "$STRATEGY" = docker ]; then
+		NEXT_TAG=$(bump "$version" patch)
+	else
+		NEXT_TAG=$(cliff --bumped-version)
+		case $NEXT_TAG in v*) ;; *) NEXT_TAG=v$NEXT_TAG ;; esac
+		if ! printf '%s' "$NEXT_TAG" | grep -qE "$TAG_PATTERN"; then
+			die "git-cliff proposed '$NEXT_TAG', not a vX.Y.Z version"
+		fi
+		[ "$NEXT_TAG" = "$LATEST_TAG" ] && NEXT_TAG=$(bump "$version" patch)
+	fi
+	log "Next tag: $NEXT_TAG"
+
+	NOTES_FILE=$(mktemp)
+	{
+		if [ -n "$DIGEST_NOTE" ]; then
+			printf '%s\n\n' "$DIGEST_NOTE"
+		fi
+		if [ -n "${AUTO_RELEASE_BASE_IMAGE_PATTERN:-}" ] && [ -f Dockerfile ]; then
+			base=$(grep -E "$AUTO_RELEASE_BASE_IMAGE_PATTERN" Dockerfile || true)
+			if [ -n "$base" ]; then
+				# shellcheck disable=SC2016 # Markdown fence, not a command substitution
+				printf 'Base image:\n```\n%s\n```\n\n' "$base"
+			fi
+		fi
+		notes=$(cliff --unreleased --tag "$NEXT_TAG" --strip all)
+		notes=$(printf '%s\n' "$notes" | sed -e '/./,$!d')
+		if [ -n "$notes" ]; then
+			printf '%s\n' "$notes"
+		elif [ "$count" -eq 0 ]; then
+			printf 'No commits since %s.\n' "$LATEST_TAG"
+		else
+			printf 'No notable changes since %s.\n' "$LATEST_TAG"
+		fi
+		if [ -n "$COMPARE_URL" ]; then
+			printf '\n**Full changelog:** %s%s...%s\n' "$COMPARE_URL" "$LATEST_TAG" "$NEXT_TAG"
+		fi
+	} >"$NOTES_FILE"
+}
+
+report() {
+	if [ -n "${GITHUB_OUTPUT:-}" ]; then
+		{
+			printf 'released=%s\n' "$1"
+			printf 'tag=%s\n' "$NEXT_TAG"
+		} >>"$GITHUB_OUTPUT"
+	fi
+	[ "$NEEDED" = true ] || return 0
+	printf '## %s\n\n' "$NEXT_TAG"
+	cat "$NOTES_FILE"
+	if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+		{
+			if [ "$1" = true ]; then printf '## Released %s\n\n' "$NEXT_TAG"; else printf '## Next release: %s (not tagged)\n\n' "$NEXT_TAG"; fi
+			cat "$NOTES_FILE"
+		} >>"$GITHUB_STEP_SUMMARY"
+	fi
+}
+
+release() {
+	[ -n "$FORGE_TOKEN" ] || die "no token: set AUTO_RELEASE_TOKEN (GitHub and Forgejo also take GITHUB_TOKEN)"
+	git tag "$NEXT_TAG"
+	if ! out=$(git push --quiet "$PUSH_URL" "refs/tags/${NEXT_TAG}" 2>&1); then
+		printf '%s\n' "$out" | sed "s|${FORGE_TOKEN}|***|g" >&2
+		die "pushing $NEXT_TAG failed"
+	fi
+	log "Pushed $NEXT_TAG"
+	# The tag is out either way: start its build even if the Release failed,
+	# then fail the job so the missing Release gets noticed.
+	rc=0
+	if forge_release "$NEXT_TAG" "$NOTES_FILE"; then
+		log "Created the $FORGE Release for $NEXT_TAG"
+	else
+		log "auto-release: creating the Release for $NEXT_TAG failed"
+		rc=1
+	fi
+	forge_dispatch "$NEXT_TAG" || rc=1
+	return "$rc"
+}
+
+main() {
+	command=plan
+	is_true "${AUTO_RELEASE_DRY_RUN:-}" || command=${1:-release}
+	case ${1:-} in -h | --help | help) usage ;; esac
+	case $command in plan | release) ;; *) log "unknown command '$command'"; usage 2 ;; esac
+
+	git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
+	if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+		die "shallow clone: fetch the full history (fetch-depth: 0 / GIT_DEPTH: 0)"
+	fi
+
+	STRATEGY=${AUTO_RELEASE_STRATEGY:-commits}
+	FORGE=$(detect_forge)
+	case $FORGE in github | gitlab | forgejo | none) ;; *) die "unknown forge '$FORGE'" ;; esac
+	"setup_$FORGE"
+	# Tests push to a local bare repository instead.
+	PUSH_URL=${AUTO_RELEASE_PUSH_URL:-$PUSH_URL}
+	log "Forge: $FORGE, strategy: $STRATEGY"
+	if [ "$command" = release ] && [ "$FORGE" = none ]; then
+		die "no forge detected, so nothing to release to: run 'auto-release plan' or set AUTO_RELEASE_FORGE"
+	fi
+
+	if git remote get-url origin >/dev/null 2>&1; then
+		git fetch --quiet --tags origin 2>/dev/null || log "warning: could not fetch tags; using the local ones"
+	fi
+	plan
+	if [ "$command" = plan ] || [ "$NEEDED" != true ]; then
+		report false
+		return 0
+	fi
+	release_rc=0
+	release || release_rc=$?
+	report true
+	return "$release_rc"
+}
+
+main "$@"

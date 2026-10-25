@@ -1,0 +1,60 @@
+# Default git-cliff config for auto-release: the release notes, grouped by
+# Conventional Commit type, and the version bump rules. A repository overrides
+# it with its own cliff.toml (or AUTO_RELEASE_CONFIG). auto-release passes the
+# tag pattern on the command line, so a caller's config cannot change which
+# tags count as releases.
+
+[changelog]
+# Groups sort by name, so each starts with a hidden order number.
+body = """
+{%- macro line(commit) -%}
+{%- set commit_url = get_env(name="AUTO_RELEASE_COMMIT_URL", default="") -%}
+- {% if commit.scope and commit.scope not in ["deps", "security"] %}**{{ commit.scope }}:** {% endif %}{{ commit.message | split(pat="\n") | first | trim }} \
+{%- if commit_url %} ([{{ commit.id | truncate(length=7, end="") }}]({{ commit_url }}{{ commit.id }})) \
+{%- else %} ({{ commit.id | truncate(length=7, end="") }}){% endif %}
+{%- endmacro -%}
+{%- set breaking = commits | filter(attribute="breaking", value=true) -%}
+{%- if breaking %}
+### ⚠ Breaking changes
+{% for commit in breaking %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.breaking_description | default(value=commit.message) | split(pat="\n") | first | trim }}
+{%- endfor %}
+{% endif -%}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+{% for commit in commits %}
+{{ self::line(commit=commit) }}
+{%- endfor %}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+# Keep commits that are not Conventional: they land under "Other changes"
+# rather than vanishing from the notes.
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+sort_commits = "newest"
+commit_parsers = [
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^Merge (branch|pull request|remote-tracking branch) ", skip = true },
+  # Renovate pin and lock file refreshes say nothing a reader can use; version
+  # updates ("from 3.14.7 to 3.14.8") stay.
+  { message = "^[a-z]+\\(deps\\).*\\((digest|lockFileMaintenance)\\)", skip = true },
+  { message = "^[a-z]+\\(security\\)", group = "<!-- 1 -->Security" },
+  { message = "^(fix|chore|build)\\(deps\\)", group = "<!-- 5 -->Dependencies" },
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 2 -->Fixes" },
+  { message = "^perf", group = "<!-- 3 -->Performance" },
+  { message = "^revert", group = "<!-- 4 -->Reverts" },
+  { message = ".*", group = "<!-- 6 -->Other changes" },
+]
+
+[bump]
+# The rules auto-release always had: a breaking change bumps the major even
+# before 1.0.0, a feat the minor, anything else the patch.
+features_always_bump_minor = true
+breaking_always_bump_major = true
