@@ -348,14 +348,26 @@ main() {
 	case ${1:-} in -h | --help | help) usage ;; esac
 	case $command in plan | release) ;; *) log "unknown command '$command'"; usage 2 ;; esac
 
-	git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
-	if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
-		die "shallow clone: fetch the full history (fetch-depth: 0 / GIT_DEPTH: 0)"
-	fi
-
 	STRATEGY=${AUTO_RELEASE_STRATEGY:-commits}
 	FORGE=$(detect_forge)
 	case $FORGE in github | gitlab | forgejo | none) ;; *) die "unknown forge '$FORGE'" ;; esac
+
+	# A job container runs as root on a checkout owned by the runner's user,
+	# and actions/checkout records safe.directory only under a temporary HOME,
+	# so git would refuse the repository as dubious ownership. In CI the
+	# checkout is the job's own: trust it, for this process only.
+	if [ "$FORGE" != none ]; then
+		n=${GIT_CONFIG_COUNT:-0}
+		export "GIT_CONFIG_KEY_$n=safe.directory" "GIT_CONFIG_VALUE_$n=*"
+		export GIT_CONFIG_COUNT=$((n + 1))
+	fi
+
+	if ! err=$(git rev-parse --git-dir 2>&1 >/dev/null); then
+		die "not inside a usable git repository: $err"
+	fi
+	if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+		die "shallow clone: fetch the full history (fetch-depth: 0 / GIT_DEPTH: 0)"
+	fi
 	"setup_$FORGE"
 	# Tests push to a local bare repository instead.
 	PUSH_URL=${AUTO_RELEASE_PUSH_URL:-$PUSH_URL}
