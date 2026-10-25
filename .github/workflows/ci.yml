@@ -50,7 +50,7 @@ jobs:
 
   docker:
     needs: test
-    uses: mbologna/.github/.github/workflows/docker-ci.yml@24617a5f3d3b88dce561f5504ee02f9f3d98088f # main
+    uses: mbologna/.github/.github/workflows/docker-ci.yml@63deea7f993150cc855466e01c72747becb8211d # main
     with:
       image_name: auto-release
       push_to_dockerhub: false
@@ -71,6 +71,6 @@ jobs:
     permissions:
       contents: write
       actions: write
-    uses: mbologna/.github/.github/workflows/auto-release.yml@24617a5f3d3b88dce561f5504ee02f9f3d98088f # main
+    uses: mbologna/.github/.github/workflows/auto-release.yml@63deea7f993150cc855466e01c72747becb8211d # main
     with:
       strategy: commits
