@@ -28,6 +28,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
 
       - name: ShellCheck
         run: shellcheck -s sh bin/auto-release
@@ -36,6 +38,15 @@ jobs:
       # crane versions that releases will use.
       - name: Tests
         run: docker build --target test .
+
+      # How the wrapper runs it: a root job container on a checkout owned by
+      # the runner's user, which git and libgit2 refuse unless trusted.
+      - name: Plan as root on the runner's checkout
+        run: |
+          docker build -t auto-release:ci .
+          docker run --rm -v "$PWD:/w" -w /w \
+            -e GITHUB_ACTIONS=true -e GITHUB_REPOSITORY -e GITHUB_SERVER_URL \
+            auto-release:ci auto-release plan
 
   docker:
     needs: test
