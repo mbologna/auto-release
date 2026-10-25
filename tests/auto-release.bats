@@ -14,6 +14,7 @@ setup() {
 	export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com
 	export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
 	unset GITHUB_ACTIONS GITLAB_CI FORGEJO_ACTIONS GITEA_ACTIONS GITHUB_OUTPUT GITHUB_STEP_SUMMARY
+	unset GITHUB_REF CI_COMMIT_TAG
 	unset AUTO_RELEASE_STRATEGY AUTO_RELEASE_IMAGE AUTO_RELEASE_TOKEN AUTO_RELEASE_DRY_RUN
 
 	mkdir -p stubs
@@ -395,4 +396,25 @@ next_tag() {
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"creating the Release for v1.2.4 failed"* ]]
 	grep -qx dispatched "$STUB_LOG"
+}
+
+@test "a release run on a tag ref does nothing, so a dispatched tag build cannot loop" {
+	export GITHUB_ACTIONS=true GITHUB_REPOSITORY=example/app GITHUB_TOKEN=secret
+	export GITHUB_REF=refs/tags/v1.2.3 AUTO_RELEASE_PUSH_URL="$BATS_TEST_TMPDIR/remote.git"
+	export AUTO_RELEASE_STRATEGY=docker AUTO_RELEASE_IMAGE=docker.io/example/app STUB_DIGEST_latest=sha256:new
+	git tag v1.2.3
+	run "$AUTO_RELEASE" release
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"Running on tag v1.2.3"* ]]
+	[ -z "$(git ls-remote --tags "$BATS_TEST_TMPDIR/remote.git")" ]
+	[ ! -s "$STUB_LOG" ]
+}
+
+@test "gitlab: a tag pipeline does not release" {
+	export GITLAB_CI=true CI_COMMIT_TAG=v1.2.3 AUTO_RELEASE_TOKEN=secret
+	git tag v1.2.3
+	commit "fix: a"
+	run "$AUTO_RELEASE" release
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"Running on tag v1.2.3"* ]]
 }

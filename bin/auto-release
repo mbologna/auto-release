@@ -364,6 +364,12 @@ trust_checkout() {
 	export HOME="$home" GIT_CONFIG_GLOBAL="$home/.gitconfig"
 }
 
+on_tag_ref() {
+	ON_TAG=${CI_COMMIT_TAG:-}
+	case ${GITHUB_REF:-} in refs/tags/*) ON_TAG=${GITHUB_REF#refs/tags/} ;; esac
+	[ -n "$ON_TAG" ]
+}
+
 main() {
 	command=plan
 	is_true "${AUTO_RELEASE_DRY_RUN:-}" || command=${1:-release}
@@ -373,6 +379,13 @@ main() {
 	STRATEGY=${AUTO_RELEASE_STRATEGY:-commits}
 	FORGE=$(detect_forge)
 	case $FORGE in github | gitlab | forgejo | none) ;; *) die "unknown forge '$FORGE'" ;; esac
+	# A release run on a tag ref is the tag build it dispatched itself. With
+	# the docker strategy its version image is not built yet, so it would tag
+	# again, and again: docker-salt got 995 tags on one commit that way.
+	if [ "$command" = release ] && on_tag_ref; then
+		log "Running on tag ${ON_TAG}: releases are cut from branches. Skipping."
+		return 0
+	fi
 
 	[ "$FORGE" = none ] || trust_checkout
 
