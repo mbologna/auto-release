@@ -323,7 +323,8 @@ report() {
 
 release() {
 	[ -n "$FORGE_TOKEN" ] || die "no token: set AUTO_RELEASE_TOKEN (GitHub and Forgejo also take GITHUB_TOKEN)"
-	git tag "$NEXT_TAG"
+	# Lightweight, whatever the runner's config says about signing tags.
+	git -c tag.gpgSign=false tag "$NEXT_TAG"
 	if ! out=$(git push --quiet "$PUSH_URL" "refs/tags/${NEXT_TAG}" 2>&1); then
 		printf '%s\n' "$out" | sed "s|${FORGE_TOKEN}|***|g" >&2
 		die "pushing $NEXT_TAG failed"
@@ -342,6 +343,27 @@ release() {
 	return "$rc"
 }
 
+# A job container runs as root on a checkout owned by the runner's user, and
+# actions/checkout records safe.directory only under a temporary HOME, so git
+# and git-cliff (libgit2) refuse the repository as dubious ownership. In CI the
+# checkout is the job's own: trust it, for this process only. libgit2 reads
+# neither -c nor GIT_CONFIG_*, only the global file, hence a temporary HOME
+# whose .gitconfig includes the real one.
+trust_checkout() {
+	global=${GIT_CONFIG_GLOBAL:-${HOME:-/nonexistent}/.gitconfig}
+	home=$(mktemp -d)
+	{
+		if [ -f "$global" ]; then
+			printf '[include]\n\tpath = %s\n' "$global"
+		fi
+		printf '[safe]\n\tdirectory = *\n\tdirectory = %s\n' "$(pwd -P)"
+	} >"$home/.gitconfig"
+	if [ -d "${HOME:-/nonexistent}/.docker" ]; then
+		export DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}"
+	fi
+	export HOME="$home" GIT_CONFIG_GLOBAL="$home/.gitconfig"
+}
+
 main() {
 	command=plan
 	is_true "${AUTO_RELEASE_DRY_RUN:-}" || command=${1:-release}
@@ -352,15 +374,7 @@ main() {
 	FORGE=$(detect_forge)
 	case $FORGE in github | gitlab | forgejo | none) ;; *) die "unknown forge '$FORGE'" ;; esac
 
-	# A job container runs as root on a checkout owned by the runner's user,
-	# and actions/checkout records safe.directory only under a temporary HOME,
-	# so git would refuse the repository as dubious ownership. In CI the
-	# checkout is the job's own: trust it, for this process only.
-	if [ "$FORGE" != none ]; then
-		n=${GIT_CONFIG_COUNT:-0}
-		export "GIT_CONFIG_KEY_$n=safe.directory" "GIT_CONFIG_VALUE_$n=*"
-		export GIT_CONFIG_COUNT=$((n + 1))
-	fi
+	[ "$FORGE" = none ] || trust_checkout
 
 	if ! err=$(git rev-parse --git-dir 2>&1 >/dev/null); then
 		die "not inside a usable git repository: $err"
