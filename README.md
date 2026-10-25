@@ -51,6 +51,7 @@ jobs:
       # image: docker.io/mbologna/docker-bitlbee   (docker strategy)
       # base_image_pattern: '^ARG UPSTREAM_'
       # dispatch_tag_build: false                  (no build runs on tags)
+      # dispatch_workflow: publish.yml             (build the tag with another workflow)
       # dry_run: true                              (plan only, in the job summary)
 ```
 
@@ -60,7 +61,7 @@ Include the [`ci-templates`](https://gitlab.com/mbologna/ci-templates) component
 
 ```yaml
 include:
-  - component: gitlab.com/mbologna/ci-templates/auto-release@3.0.0
+  - component: gitlab.com/mbologna/ci-templates/auto-release@2.1.1
     inputs:
       strategy: commits       # or conventional, docker
 ```
@@ -110,7 +111,9 @@ The run needs the full history: `fetch-depth: 0` on GitHub and Forgejo, `GIT_DEP
 
 ## Tokens
 
-GitHub does not start workflow runs for a tag pushed with `GITHUB_TOKEN`. `auto-release` therefore dispatches the calling workflow on the new tag, which is why the caller needs `actions: write` and a `workflow_dispatch` trigger. A tag pushed on GitLab with a project or personal token starts a tag pipeline by itself. Forgejo behaves like GitHub for its automatic token, so the example above uses a personal token and names the workflow to dispatch. Forgejo support is covered by the tests against a stubbed API and has not yet run on Codeberg.
+GitHub does not start workflow runs for a tag pushed with `GITHUB_TOKEN`. `auto-release` therefore dispatches the calling workflow on the new tag, which is why the caller needs `actions: write` and a `workflow_dispatch` trigger. A tag pushed on GitLab with a project or personal token starts a tag pipeline by itself. The Forgejo example uses a personal token and names the workflow to dispatch, which covers both behaviours of its automatic token. Forgejo support is covered by the tests against a stubbed API and has not run on Codeberg.
+
+A `release` run on a tag ref does nothing. The tag build that auto-release dispatches may be the same workflow that called it, and with the `docker` strategy that run would otherwise see the version image missing and tag again.
 
 If creating the Release fails after the tag is pushed, the run still starts the tag build and then fails, so the missing Release shows up as a failed job.
 
