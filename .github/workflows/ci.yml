@@ -39,10 +39,27 @@ jobs:
 
   docker:
     needs: test
-    uses: mbologna/.github/.github/workflows/docker-ci.yml@83a94cc1bdc464afe31abb9cb99a575e5a8a38ef # main
+    uses: mbologna/.github/.github/workflows/docker-ci.yml@4dc590225b5a41b45e783f7643d226e3a9fa9b13 # main
     with:
       image_name: auto-release
       push_to_dockerhub: false
       enable_cosign: true
       enable_release_drafter: true
     secrets: inherit
+
+  auto-release:
+    # The weekly run releases what landed since the last tag; a manual run on
+    # main releases it now. The tag build it dispatches runs on the tag ref, so
+    # it does not release again.
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    needs: [docker]
+    # contents: push the tag and create the Release; actions: dispatch this
+    # workflow on it, since a tag pushed with GITHUB_TOKEN triggers no run.
+    permissions:
+      contents: write
+      actions: write
+    uses: mbologna/.github/.github/workflows/auto-release.yml@4dc590225b5a41b45e783f7643d226e3a9fa9b13 # main
+    with:
+      strategy: commits
