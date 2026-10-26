@@ -42,6 +42,18 @@ setup() {
 		[ -n "$d" ] || { echo "MANIFEST_UNKNOWN" >&2; exit 1; }
 		echo "$d"
 	EOF
+	cat >stubs/trivy <<-'EOF'
+		#!/bin/sh
+		# trivy image ... IMAGE:TAG -> JSON with STUB_VULNS_<TAG> ("CVE pkg;CVE pkg"),
+		# or a scan failure when STUB_VULNS_<TAG> is unset.
+		for last; do :; done
+		tag=$(printf '%s' "${last##*:}" | tr . _)
+		eval "set -- \${STUB_VULNS_$tag+x}"
+		[ -n "${1:-}" ] || { echo "image not found" >&2; exit 1; }
+		eval "v=\$STUB_VULNS_$tag"
+		printf '%s' "$v" | tr ';' '\n' | jq -R -s -c \
+			'{Results: [{Vulnerabilities: [split("\n")[] | select(length > 0) | split(" ") | {VulnerabilityID: .[0], PkgName: .[1]}]}]}'
+	EOF
 	chmod +x stubs/*
 	export PATH="$BATS_TEST_TMPDIR/stubs:$PATH" STUB_LOG="$BATS_TEST_TMPDIR/stub.log"
 	: >"$STUB_LOG"
@@ -417,4 +429,68 @@ next_tag() {
 	run "$AUTO_RELEASE" release
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"Running on tag v1.2.3"* ]]
+}
+
+@test "security: a Renovate fix(security) update releases at once" {
+	export AUTO_RELEASE_STRATEGY=security
+	git tag v1.2.3
+	commit "chore(deps): update x"
+	commit "fix(security): update filelock to 4.2.1"
+	next_tag
+	[ "$next" = v1.2.4 ]
+	[[ "$output" == *"### Security"* ]]
+}
+
+@test "security: chores and features alone wait for Monday" {
+	export AUTO_RELEASE_STRATEGY=security
+	git tag v1.2.3
+	commit "chore(deps): update python from 3.14.7 to 3.14.8"
+	commit "feat: a"
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+	[[ "$stderr" == *"No security fix since v1.2.3"* ]]
+}
+
+@test "security: an image rebuild that drops CVEs releases, listing them" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_1_2_3="CVE-2026-1 openssl;CVE-2026-2 zlib;CVE-2026-3 busybox"
+	export STUB_VULNS_latest="CVE-2026-3 busybox"
+	git tag v1.2.3
+	commit "chore(deps): update alpine to 3.24.4"
+	next_tag
+	[ "$next" = v1.2.4 ]
+	[[ "$output" == *"### Security fixes in the image"* ]]
+	[[ "$output" == *'- CVE-2026-1 in `openssl`'* ]]
+	[[ "$output" == *'- CVE-2026-2 in `zlib`'* ]]
+	[[ "$output" != *"CVE-2026-3"* ]]
+}
+
+@test "security: same or new findings in the rebuild do not release" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_1_2_3="CVE-2026-3 busybox"
+	export STUB_VULNS_latest="CVE-2026-3 busybox;CVE-2026-9 curl"
+	git tag v1.2.3
+	commit "chore(deps): update alpine to 3.24.4"
+	next_tag
+	[ "$next" = none ]
+}
+
+@test "security: an image that cannot be scanned skips only the image check" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_latest=""
+	git tag v1.2.3
+	commit "fix(security): update requests to 2.33.0"
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$stderr" == *"cannot scan ghcr.io/example/app:1.2.3"* ]]
+	[[ "$output" == "## v1.2.4"* ]]
+}
+
+@test "security: a breaking fix(security) still bumps by the commit rules" {
+	export AUTO_RELEASE_STRATEGY=security
+	git tag v1.2.3
+	commit "fix(security)!: drop TLS 1.1"
+	next_tag
+	[ "$next" = v2.0.0 ]
 }

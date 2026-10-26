@@ -7,7 +7,7 @@
 #   auto-release release    plan, then push the tag and create the Release
 #
 # Configuration comes from the environment (CI jobs set it from their inputs):
-#   AUTO_RELEASE_STRATEGY            commits (default) | conventional | docker
+#   AUTO_RELEASE_STRATEGY            commits (default) | conventional | docker | security
 #   AUTO_RELEASE_IMAGE               docker: image to compare (GitLab: $CI_REGISTRY_IMAGE)
 #   AUTO_RELEASE_BASE_IMAGE_PATTERN  egrep pattern; matching Dockerfile lines go into the notes
 #   AUTO_RELEASE_TOKEN               token that pushes the tag and creates the Release
@@ -185,6 +185,45 @@ has_releasable_commits() {
 		grep -qE '^(feat|fix|perf|revert)(\([^)]*\))?!?:|^[a-zA-Z]+(\([^)]*\))?!:|^BREAKING[ -]CHANGE:'
 }
 
+# security: a Renovate CVE update (fix(security): ...) since the last tag.
+has_security_commits() {
+	git log "$1..HEAD" --no-merges --format='%s' | grep -qE '^[a-zA-Z]+\(security\)!?:'
+}
+
+# Fixable HIGH/CRITICAL findings of an image as sorted "CVE package" lines,
+# the same filter image-cve-alert reports with. A .trivyignore in the checkout
+# applies (trivy reads it by default). Fails when the image cannot be scanned.
+image_vulns() {
+	json=$(trivy image --quiet --image-src remote --scanners vuln --ignore-unfixed \
+		--severity "${AUTO_RELEASE_SEVERITY:-HIGH,CRITICAL}" --format json "$1") || return 1
+	printf '%s' "$json" | jq -r '.Results[]?.Vulnerabilities[]? | "\(.VulnerabilityID) \(.PkgName)"' | sort -u
+}
+
+# security: the image of the last version has findings that latest, built
+# from the commits since, no longer has. Sets SECURITY_NOTE to the list.
+image_fixes_cves() {
+	[ -n "${AUTO_RELEASE_IMAGE:-}" ] || return 1
+	registry_login
+	if ! released=$(image_vulns "${AUTO_RELEASE_IMAGE}:$1"); then
+		log "warning: cannot scan ${AUTO_RELEASE_IMAGE}:$1; skipping the image check"
+		return 1
+	fi
+	if ! current=$(image_vulns "${AUTO_RELEASE_IMAGE}:latest"); then
+		log "warning: cannot scan ${AUTO_RELEASE_IMAGE}:latest; skipping the image check"
+		return 1
+	fi
+	fixed=$(printf '%s\n' "$released" | grep -vxF -f "$(printf '%s\n' "$current" | tmpfile)" | grep . || true)
+	log "Fixable HIGH/CRITICAL in $1: $(printf '%s' "$released" | grep -c . || true), in latest: $(printf '%s' "$current" | grep -c . || true)"
+	[ -n "$fixed" ] || return 1
+	SECURITY_NOTE=$(printf '%s\n' "$fixed" | awk '{printf "- %s in `%s`\n", $1, $2}')
+}
+
+tmpfile() {
+	f=$(mktemp)
+	cat >"$f"
+	printf '%s' "$f"
+}
+
 image_digest() {
 	crane digest "$1" 2>/dev/null || true
 }
@@ -216,7 +255,7 @@ cliff() {
 
 # Sets NEEDED, NEXT_TAG, NOTES_FILE.
 plan() {
-	NEEDED=false NEXT_TAG="" DIGEST_NOTE=""
+	NEEDED=false NEXT_TAG="" DIGEST_NOTE="" SECURITY_NOTE=""
 	LATEST_TAG=$(latest_tag)
 	if [ -z "$LATEST_TAG" ]; then
 		log "No vX.Y.Z tag found: push an initial tag by hand to bootstrap. Skipping."
@@ -252,7 +291,19 @@ plan() {
 			DIGEST_NOTE="Image digest changed: \`${latest}\`"
 		fi
 		;;
-	*) die "unknown strategy '$STRATEGY' (commits, conventional or docker)" ;;
+	security)
+		# Runs on every push, outside the weekly rhythm: release at once only
+		# for a CVE fix, either a Renovate fix(security) update or an image
+		# whose rebuild dropped fixable HIGH/CRITICAL findings.
+		if [ "$count" -gt 0 ] && has_security_commits "$LATEST_TAG"; then
+			NEEDED=true
+		fi
+		if image_fixes_cves "$version"; then
+			NEEDED=true
+		fi
+		[ "$NEEDED" = true ] || log "No security fix since $LATEST_TAG."
+		;;
+	*) die "unknown strategy '$STRATEGY' (commits, conventional, docker or security)" ;;
 	esac
 
 	if [ "$NEEDED" != true ]; then
@@ -264,7 +315,7 @@ plan() {
 	# others git-cliff applies the Conventional Commit rules; when every commit
 	# is one the config skips (merges, chore(release)) it reports no bump, and
 	# a commit still landed, so release a patch.
-	if [ "$STRATEGY" = docker ]; then
+	if [ "$STRATEGY" = docker ] || [ "$count" -eq 0 ]; then
 		NEXT_TAG=$(bump "$version" patch)
 	else
 		NEXT_TAG=$(cliff --bumped-version)
@@ -278,6 +329,9 @@ plan() {
 
 	NOTES_FILE=$(mktemp)
 	{
+		if [ -n "$SECURITY_NOTE" ]; then
+			printf '### Security fixes in the image\n\n%s\n\n' "$SECURITY_NOTE"
+		fi
 		if [ -n "$DIGEST_NOTE" ]; then
 			printf '%s\n\n' "$DIGEST_NOTE"
 		fi

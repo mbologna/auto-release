@@ -14,6 +14,7 @@ It keeps what the earlier tools each did well. Like the old `auto-release` workf
    | `commits` (default) | any commit landed since the tag |
    | `conventional` | a `feat`, `fix`, `perf` or `revert` commit, or a breaking change, landed since the tag; `docs`, `chore`, `ci` and the rest alone do not release |
    | `docker` | the registry's `latest` image digest differs from the image tagged with the last version, or that version was never published |
+   | `security` | a `fix(security)` commit landed (Renovate's CVE updates), or `latest` no longer has fixable HIGH/CRITICAL [Trivy](https://trivy.dev/) findings that the image of the last version has; the notes list those CVEs |
 
 3. [git-cliff](https://git-cliff.org/) computes the bump. A breaking change (`type!:` or a `BREAKING CHANGE:` footer) bumps the major, even before 1.0.0. A `feat` bumps the minor, and anything else the patch. `docker` always bumps the patch.
 4. `auto-release release` pushes the tag, creates the Release and, on GitHub and Forgejo, starts the tag build (see [Tokens](#tokens)). `auto-release plan` prints the version and notes and changes nothing.
@@ -28,7 +29,7 @@ A repository can provide its own `cliff.toml`, or point `AUTO_RELEASE_CONFIG` at
 
 ## Use it
 
-Every repository releases on the same rhythm: Monday at 06:00 UTC, plus a run started by hand on the default branch for a release that cannot wait. Pushes do not release.
+Every repository releases on the same rhythm: Monday at 06:00 UTC with `conventional` (or `docker`), plus a run started by hand on the default branch for a release that cannot wait. Each push to the default branch runs `security`, so a CVE fix is released at once; any other push waits for Monday.
 
 ### GitHub
 
@@ -36,15 +37,16 @@ Call the reusable workflow in [`mbologna/.github`](https://github.com/mbologna/.
 
 ```yaml
 "on":
+  push:
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:          # required: the tag build is started this way
 
 jobs:
   auto-release:
-    if: >-                    # Monday, or a manual run on the default branch
+    if: >-                    # Monday, a manual run, or a push (security only)
       github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' &&
+      ((github.event_name == 'workflow_dispatch' || github.event_name == 'push') &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
     needs: [docker]
     permissions:
@@ -52,8 +54,8 @@ jobs:
       actions: write          # start this workflow on the new tag
     uses: mbologna/.github/.github/workflows/auto-release.yml@<sha> # main
     with:
-      strategy: commits       # or conventional, docker
-      # image: docker.io/mbologna/docker-bitlbee   (docker strategy)
+      strategy: conventional  # or commits, docker; a push always runs security
+      # image: ghcr.io/mbologna/app                (docker strategy, security image check)
       # base_image_pattern: '^ARG UPSTREAM_'
       # dispatch_tag_build: false                  (no build runs on tags)
       # dispatch_workflow: publish.yml             (build the tag with another workflow)
