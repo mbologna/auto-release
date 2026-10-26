@@ -31,6 +31,10 @@ A repository can provide its own `cliff.toml`, or point `AUTO_RELEASE_CONFIG` at
 
 Every repository releases on the same rhythm: Monday at 06:00 UTC with `conventional` (or `docker`), plus a run started by hand on the default branch for a release that cannot wait. Each push to the default branch runs `security`, so a CVE fix is released at once; any other push waits for Monday.
 
+### Branches
+
+`main` is always releasable: work happens on short-lived branches and reaches `main` through a pull or merge request, squash-merged. The squash commit's subject is the PR title, and auto-release reads that subject for the release-note line and the version bump, so a check (`mbologna/.github`'s `pr-title.yml` on GitHub, ci-templates' `conventional-title` on GitLab) requires PR titles to be Conventional Commits.
+
 ### GitHub
 
 Call the reusable workflow in [`mbologna/.github`](https://github.com/mbologna/.github/blob/main/.github/workflows/auto-release.yml) from the repository's CI workflow:
