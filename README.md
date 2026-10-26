@@ -28,6 +28,8 @@ A repository can provide its own `cliff.toml`, or point `AUTO_RELEASE_CONFIG` at
 
 ## Use it
 
+Every repository releases on the same rhythm: Monday at 06:00 UTC, plus a run started by hand on the default branch for a release that cannot wait. Pushes do not release.
+
 ### GitHub
 
 Call the reusable workflow in [`mbologna/.github`](https://github.com/mbologna/.github/blob/main/.github/workflows/auto-release.yml) from the repository's CI workflow:
@@ -40,7 +42,10 @@ Call the reusable workflow in [`mbologna/.github`](https://github.com/mbologna/.
 
 jobs:
   auto-release:
-    if: github.event_name == 'schedule'
+    if: >-                    # Monday, or a manual run on the default branch
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
     needs: [docker]
     permissions:
       contents: write         # push the tag, create the Release
@@ -61,12 +66,12 @@ Include the [`ci-templates`](https://gitlab.com/mbologna/ci-templates) component
 
 ```yaml
 include:
-  - component: gitlab.com/mbologna/ci-templates/auto-release@2.1.1
+  - component: gitlab.com/mbologna/ci-templates/auto-release@3.0.0
     inputs:
       strategy: commits       # or conventional, docker
 ```
 
-The `docker` strategy reads `$CI_REGISTRY_IMAGE` with the job token.
+The job runs only in scheduled pipelines on the default branch: add a pipeline schedule on `main` with cron `0 6 * * 1` (UTC), and use its "Run now" to release at once. The `docker` strategy reads `$CI_REGISTRY_IMAGE` with the job token.
 
 ### Forgejo (Codeberg)
 
