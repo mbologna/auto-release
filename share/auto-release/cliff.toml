@@ -42,8 +42,11 @@ commit_parsers = [
   { message = "^chore\\(release\\)", skip = true },
   { message = "^Merge (branch|pull request|remote-tracking branch) ", skip = true },
   # Renovate pin and lock file refreshes say nothing a reader can use; version
-  # updates ("from 3.14.7 to 3.14.8") stay.
+  # updates ("from 3.14.7 to 3.14.8") stay. Lock file maintenance is titled
+  # "chore(deps): maintain lock files" (the preset's commitMessageAction), or
+  # "maintain <dir> (lockFileMaintenance)" in older configs.
   { message = "^[a-z]+\\(deps\\).*\\((digest|lockFileMaintenance)\\)", skip = true },
+  { message = "^[a-z]+\\(deps\\): maintain ", skip = true },
   { message = "^[a-z]+\\(security\\)", group = "<!-- 1 -->Security" },
   { message = "^(fix|chore|build)\\(deps\\)", group = "<!-- 5 -->Dependencies" },
   { message = "^feat", group = "<!-- 0 -->Features" },

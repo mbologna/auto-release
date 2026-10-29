@@ -263,12 +263,14 @@ next_tag() {
 	git tag v1.2.3
 	commit "chore(deps): update action/.github to cebe9d2 (digest) [automerge] (#191)"
 	commit "chore(deps): maintain terraform/ (lockFileMaintenance) [automerge] (#180)"
+	commit "chore(deps): maintain lock files (#55)"
 	commit "chore(deps): update python from 3.14.7 to 3.14.8 (patch) (#7)"
 	next_tag
 	[ "$next" = v1.2.4 ]
 	[[ "$output" == *"update python from 3.14.7 to 3.14.8"* ]]
 	[[ "$output" != *"(digest)"* ]]
 	[[ "$output" != *"lockFileMaintenance"* ]]
+	[[ "$output" != *"maintain lock files"* ]]
 }
 
 @test "notes: the base image lines are included" {
