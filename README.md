@@ -14,7 +14,7 @@ It keeps what the earlier tools each did well. Like the old `auto-release` workf
    | `commits` (default) | any commit landed since the tag |
    | `conventional` | a `feat`, `fix`, `perf` or `revert` commit, or a breaking change, landed since the tag; `docs`, `chore`, `ci` and the rest alone do not release |
    | `docker` | the registry's `latest` image digest differs from the image tagged with the last version, or that version was never published |
-   | `security` | a `fix(security)` commit landed (Renovate's CVE updates), or `latest` no longer has fixable HIGH/CRITICAL [Trivy](https://trivy.dev/) findings that the image of the last version has; the notes list those CVEs |
+   | `security` | a `fix(security)` commit landed (Renovate's CVE updates), or the base image of a Dockerfile changed and the new one no longer has fixable HIGH/CRITICAL [Trivy](https://trivy.dev/) findings that the old one has; the notes list those CVEs. See [The security strategy](#the-security-strategy) |
 
 3. [git-cliff](https://git-cliff.org/) computes the bump. A breaking change (`type!:` or a `BREAKING CHANGE:` footer) bumps the major, even before 1.0.0. A `feat` bumps the minor, and anything else the patch. `docker` always bumps the patch.
 4. `auto-release release` pushes the tag, creates the Release and, on GitHub and Forgejo, starts the tag build (see [Tokens](#tokens)). `auto-release plan` prints the version and notes and changes nothing.
@@ -23,9 +23,24 @@ It keeps what the earlier tools each did well. Like the old `auto-release` workf
 
 The bundled [`share/auto-release/cliff.toml`](share/auto-release/cliff.toml) groups commits under Breaking changes, Features, Security (`*(security):`), Fixes, Performance, Reverts, Dependencies (`fix|chore|build(deps):`) and Other changes. Commits that do not follow Conventional Commits go under Other changes. Merge commits, `chore(release)` commits and Renovate digest and lock-file refreshes are left out. Each line links to its commit, and the notes end with a compare link.
 
-The `docker` strategy adds the new image digest at the top. When the base image pattern is set, the matching `Dockerfile` lines are added too.
+The `security` strategy puts the CVEs that a base image update fixed under "Security fixes in the image" at the top. The `docker` strategy adds the new image digest there. When the base image pattern is set, the matching `Dockerfile` lines are added too.
 
 A repository can provide its own `cliff.toml`, or point `AUTO_RELEASE_CONFIG` at one. The tag pattern is always passed on the command line.
+
+## The security strategy
+
+CI runs `security` on every push to the default branch, so it has to decide from the commit alone. Two things release at once:
+
+- A `fix(security)` or `fix(security)!` commit since the last tag. This is the title Renovate gives its vulnerability updates. Other types with the same scope, such as `chore(security)` for a development-only dependency, wait for the next scheduled release.
+- A base image update that fixes CVEs. For each Dockerfile in `AUTO_RELEASE_DOCKERFILES` (default `Dockerfile`), auto-release reads the base image of the final stage at the last tag and at `HEAD`. That is the image named by the last `FROM`, or by the stage it builds on when it is `FROM <stage>`. `${VAR}`, `${VAR:-default}` and `$VAR` take the defaults of the `ARG` lines before the first `FROM`, and `--platform` is ignored. When the reference changed, its tag or its digest, Trivy scans both images straight from their registries, with the same filter as everywhere else: vulnerabilities only, HIGH and CRITICAL, fixable ones, minus the checkout's `.trivyignore`. Findings in the old image that the new one does not have are the fixed CVEs. If there are any, the run releases and lists them.
+
+Nothing is built for this check. A Dockerfile that is missing at `HEAD` is skipped silently. One added since the last tag, one that builds `FROM scratch`, one whose base depends on an `ARG` with no default, or one whose images cannot be scanned is skipped with a log line, and the run carries on.
+
+Trivy reads registry credentials from the Docker config (`~/.docker/config.json` or `$DOCKER_CONFIG`) and its usual environment variables. Public base images on Docker Hub, `ghcr.io`, `lscr.io` or `registry.gitlab.com` need none. auto-release logs in to the project's own registry only, as before: on GitLab with the job token when `AUTO_RELEASE_IMAGE` (default `$CI_REGISTRY_IMAGE`) is there, on GitHub and Forgejo with the forge token when `AUTO_RELEASE_IMAGE` is on `ghcr.io` or the Forgejo host.
+
+A repository with more than one image, or a Dockerfile outside the root, lists them all, separated by spaces or commas and relative to the repository root: `AUTO_RELEASE_DOCKERFILES: "Dockerfile tools/Dockerfile"`. The GitHub wrapper and the GitLab component take it as their `dockerfiles` input; on Forgejo, set it in the step's `env`. The base image tag or digest has to change in the Dockerfile for this check to see it. A floating tag such as `alpine:3` that moves upstream goes unnoticed, so pin digests and let Renovate move them.
+
+Before 0.3.0 this check compared the image of the last version with the registry's `latest`, which meant building and pushing `latest` on every push. That comparison is gone: `AUTO_RELEASE_IMAGE` now only matters for the `docker` strategy and for the registry login.
 
 ## Use it
 
@@ -59,7 +74,8 @@ jobs:
     uses: mbologna/.github/.github/workflows/auto-release.yml@<sha> # main
     with:
       strategy: conventional  # or commits, docker; a push always runs security
-      # image: ghcr.io/mbologna/app                (docker strategy, security image check)
+      # dockerfiles: "Dockerfile tools/Dockerfile" (security strategy; default Dockerfile)
+      # image: ghcr.io/mbologna/app                (docker strategy, registry login)
       # base_image_pattern: '^ARG UPSTREAM_'
       # dispatch_tag_build: false                  (no build runs on tags)
       # dispatch_workflow: publish.yml             (build the tag with another workflow)
@@ -108,8 +124,9 @@ jobs:
 
 | Variable | Meaning |
 |---|---|
-| `AUTO_RELEASE_STRATEGY` | `commits` (default), `conventional` or `docker` |
-| `AUTO_RELEASE_IMAGE` | image the `docker` strategy compares, without a tag; GitLab defaults to `$CI_REGISTRY_IMAGE` |
+| `AUTO_RELEASE_STRATEGY` | `commits` (default), `conventional`, `docker` or `security` |
+| `AUTO_RELEASE_DOCKERFILES` | Dockerfiles whose final base image the `security` strategy compares, separated by spaces or commas; default `Dockerfile`; missing ones are skipped |
+| `AUTO_RELEASE_IMAGE` | image the `docker` strategy compares, without a tag; GitLab defaults to `$CI_REGISTRY_IMAGE`. auto-release logs in to its registry with the forge's token |
 | `AUTO_RELEASE_BASE_IMAGE_PATTERN` | extended regular expression; matching `Dockerfile` lines go into the notes |
 | `AUTO_RELEASE_TOKEN` | token that pushes the tag and creates the Release; GitHub and Forgejo fall back to `GITHUB_TOKEN` |
 | `AUTO_RELEASE_DISPATCH` | `false` skips starting the tag build |
@@ -130,7 +147,7 @@ If creating the Release fails after the tag is pushed, the run still starts the 
 
 ## Development
 
-`tests/auto-release.bats` builds throwaway repositories for each rule above. It stubs `curl` and `crane` and pushes tags to a local bare repository.
+`tests/auto-release.bats` builds throwaway repositories for each rule above. It stubs `curl`, `crane` and `trivy` and pushes tags to a local bare repository.
 
 ```sh
 bats tests/                         # needs git, git-cliff, jq
