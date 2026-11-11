@@ -52,7 +52,7 @@ jobs:
 
   docker:
     needs: test
-    uses: mbologna/.github/.github/workflows/docker-ci.yml@4ba7c7930fdf79124c856073037b1f20a41ea98e # main
+    uses: mbologna/.github/.github/workflows/docker-ci.yml@4ab7563caf5d7d861f5275163417627e38eecc0e # main
     with:
       image_name: auto-release
       # Only release tags publish the image (auto-release dispatches
@@ -60,7 +60,6 @@ jobs:
       publish: release
       push_to_dockerhub: false
       enable_cosign: true
-      enable_release_drafter: true
     secrets: inherit
 
   auto-release:
@@ -78,7 +77,7 @@ jobs:
     permissions:
       contents: write
       actions: write
-    uses: mbologna/.github/.github/workflows/auto-release.yml@4ba7c7930fdf79124c856073037b1f20a41ea98e # main
+    uses: mbologna/.github/.github/workflows/auto-release.yml@4ab7563caf5d7d861f5275163417627e38eecc0e # main
     with:
       strategy: conventional
       image: ghcr.io/mbologna/auto-release
