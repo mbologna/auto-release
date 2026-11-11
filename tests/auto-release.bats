@@ -16,6 +16,7 @@ setup() {
 	unset GITHUB_ACTIONS GITLAB_CI FORGEJO_ACTIONS GITEA_ACTIONS GITHUB_OUTPUT GITHUB_STEP_SUMMARY
 	unset GITHUB_REF CI_COMMIT_TAG
 	unset AUTO_RELEASE_STRATEGY AUTO_RELEASE_IMAGE AUTO_RELEASE_TOKEN AUTO_RELEASE_DRY_RUN
+	unset AUTO_RELEASE_DOCKERFILES
 
 	mkdir -p stubs
 	cat >stubs/curl <<-'EOF'
@@ -45,9 +46,12 @@ setup() {
 	cat >stubs/trivy <<-'EOF'
 		#!/bin/sh
 		# trivy image ... IMAGE:TAG -> JSON with STUB_VULNS_<TAG> ("CVE pkg;CVE pkg"),
-		# or a scan failure when STUB_VULNS_<TAG> is unset.
+		# or a scan failure when STUB_VULNS_<TAG> is unset. <TAG> is the part
+		# after the last colon (the digest for IMAGE:TAG@sha256:...), other
+		# characters than letters and digits turned into _. Logs each image.
 		for last; do :; done
-		tag=$(printf '%s' "${last##*:}" | tr . _)
+		printf '%s\n' "$last" >>"$TRIVY_LOG"
+		tag=$(printf '%s' "${last##*:}" | tr -c 'A-Za-z0-9' _)
 		eval "set -- \${STUB_VULNS_$tag+x}"
 		[ -n "${1:-}" ] || { echo "image not found" >&2; exit 1; }
 		eval "v=\$STUB_VULNS_$tag"
@@ -56,7 +60,9 @@ setup() {
 	EOF
 	chmod +x stubs/*
 	export PATH="$BATS_TEST_TMPDIR/stubs:$PATH" STUB_LOG="$BATS_TEST_TMPDIR/stub.log"
+	export TRIVY_LOG="$BATS_TEST_TMPDIR/trivy.log"
 	: >"$STUB_LOG"
+	: >"$TRIVY_LOG"
 
 	git init -q --bare remote.git
 	git init -q -b main repo
@@ -66,6 +72,14 @@ setup() {
 }
 
 commit() { git commit -q --allow-empty -m "$1"; }
+
+# Writes a Dockerfile (default ./Dockerfile) from printf-style lines and stages it.
+dockerfile() {
+	path=${DOCKERFILE:-Dockerfile}
+	mkdir -p "$(dirname "$path")"
+	printf '%s\n' "$@" >"$path"
+	git add "$path"
+}
 
 # Runs plan and leaves the proposed tag (or "none") in $next.
 next_tag() {
@@ -454,11 +468,23 @@ next_tag() {
 	[[ "$stderr" == *"No security fix since v1.2.3"* ]]
 }
 
-@test "security: an image rebuild that drops CVEs releases, listing them" {
-	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
-	export STUB_VULNS_1_2_3="CVE-2026-1 openssl;CVE-2026-2 zlib;CVE-2026-3 busybox"
-	export STUB_VULNS_latest="CVE-2026-3 busybox"
+@test "security: chore(security) and other types do not release" {
+	export AUTO_RELEASE_STRATEGY=security
 	git tag v1.2.3
+	commit "chore(security): update a dev-only linter"
+	commit "build(security): bump the test runner"
+	next_tag
+	[ "$next" = none ]
+}
+
+@test "security: a base image update that drops CVEs releases, listing them" {
+	export AUTO_RELEASE_STRATEGY=security
+	export STUB_VULNS_3_24_3="CVE-2026-1 openssl;CVE-2026-2 zlib;CVE-2026-3 busybox"
+	export STUB_VULNS_3_24_4="CVE-2026-3 busybox"
+	dockerfile 'FROM alpine:3.24.3' 'RUN apk add --no-cache curl'
+	commit "feat: add a Dockerfile"
+	git tag v1.2.3
+	dockerfile 'FROM alpine:3.24.4' 'RUN apk add --no-cache curl'
 	commit "chore(deps): update alpine to 3.24.4"
 	next_tag
 	[ "$next" = v1.2.4 ]
@@ -466,27 +492,125 @@ next_tag() {
 	[[ "$output" == *'- CVE-2026-1 in `openssl`'* ]]
 	[[ "$output" == *'- CVE-2026-2 in `zlib`'* ]]
 	[[ "$output" != *"CVE-2026-3"* ]]
+	grep -qx alpine:3.24.3 "$TRIVY_LOG"
+	grep -qx alpine:3.24.4 "$TRIVY_LOG"
 }
 
-@test "security: same or new findings in the rebuild do not release" {
-	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
-	export STUB_VULNS_1_2_3="CVE-2026-3 busybox"
-	export STUB_VULNS_latest="CVE-2026-3 busybox;CVE-2026-9 curl"
+@test "security: global ARG defaults resolve in the base image reference" {
+	export AUTO_RELEASE_STRATEGY=security
+	export STUB_VULNS_abc_ls12="CVE-2026-1 openssl" STUB_VULNS_abc_ls13=""
+	dockerfile '# syntax=docker/dockerfile:1' 'ARG REGISTRY="docker.io"' 'ARG BASE_TAG=abc-ls12' \
+		'FROM ${REGISTRY}/example/img:${BASE_TAG}' 'ARG BASE_TAG=ignored'
+	commit "feat: add a Dockerfile"
 	git tag v1.2.3
+	dockerfile '# syntax=docker/dockerfile:1' 'ARG REGISTRY="docker.io"' 'ARG BASE_TAG=abc-ls13' \
+		'FROM $REGISTRY/example/img:${BASE_TAG:-latest}' 'ARG BASE_TAG=ignored'
+	commit "chore(deps): update example/img to abc-ls13"
+	next_tag
+	[ "$next" = v1.2.4 ]
+	[[ "$output" == *'- CVE-2026-1 in `openssl`'* ]]
+	grep -qx docker.io/example/img:abc-ls12 "$TRIVY_LOG"
+	grep -qx docker.io/example/img:abc-ls13 "$TRIVY_LOG"
+}
+
+@test "security: the final stage is followed to the stage it builds on" {
+	export AUTO_RELEASE_STRATEGY=security
+	export STUB_VULNS_aaa="CVE-2026-1 openssl" STUB_VULNS_bbb=""
+	dockerfile 'FROM --platform=$BUILDPLATFORM golang:1.25 AS build' \
+		'FROM nginx:1.29@sha256:aaa AS Base' 'RUN true' \
+		'FROM base' 'COPY --from=build \' '    /out /usr/share/nginx/html'
+	commit "feat: add a Dockerfile"
+	git tag v1.2.3
+	dockerfile 'FROM --platform=$BUILDPLATFORM golang:1.26 AS build' \
+		'FROM nginx:1.29@sha256:bbb AS Base' 'RUN true' \
+		'FROM base' 'COPY --from=build \' '    /out /usr/share/nginx/html'
+	commit "chore(deps): update nginx digest"
+	next_tag
+	[ "$next" = v1.2.4 ]
+	[ "$(cat "$TRIVY_LOG")" = "$(printf 'nginx:1.29@sha256:aaa\nnginx:1.29@sha256:bbb')" ]
+}
+
+@test "security: an unchanged base image is not scanned and does not release" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_1_2_3="CVE-2026-1 openssl" STUB_VULNS_latest=""
+	dockerfile 'FROM python:3.14-slim' 'RUN pip install requests'
+	commit "feat: add a Dockerfile"
+	git tag v1.2.3
+	dockerfile 'FROM python:3.14-slim' 'RUN pip install requests httpx'
+	commit "feat: add httpx"
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+	[[ "$stderr" == *"Base image of Dockerfile unchanged since v1.2.3: python:3.14-slim"* ]]
+	[ ! -s "$TRIVY_LOG" ]
+}
+
+@test "security: a base image update without fixed CVEs does not release" {
+	export AUTO_RELEASE_STRATEGY=security
+	export STUB_VULNS_3_24_3="CVE-2026-3 busybox"
+	export STUB_VULNS_3_24_4="CVE-2026-3 busybox;CVE-2026-9 curl"
+	dockerfile 'FROM alpine:3.24.3'
+	commit "feat: add a Dockerfile"
+	git tag v1.2.3
+	dockerfile 'FROM alpine:3.24.4'
 	commit "chore(deps): update alpine to 3.24.4"
 	next_tag
 	[ "$next" = none ]
 }
 
-@test "security: an image that cannot be scanned skips only the image check" {
-	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
-	export STUB_VULNS_latest=""
+@test "security: listed Dockerfiles that do not exist are skipped" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_DOCKERFILES="Dockerfile, ./tools/Dockerfile missing/Dockerfile"
+	export STUB_VULNS_1_2="CVE-2026-1 openssl;CVE-2026-2 zlib" STUB_VULNS_1_3="CVE-2026-2 zlib"
+	DOCKERFILE=tools/Dockerfile dockerfile 'FROM syncthing/syncthing:1.2'
+	commit "feat: add the tools image"
 	git tag v1.2.3
+	DOCKERFILE=tools/Dockerfile dockerfile 'FROM syncthing/syncthing:1.3'
+	commit "chore(deps): update syncthing to 1.3"
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$output" == "## v1.2.4"* ]]
+	[[ "$output" == *'- CVE-2026-1 in `openssl`'* ]]
+	[[ "$output" != *"CVE-2026-2"* ]]
+	[[ "$stderr" != *"missing/Dockerfile"* ]]
+}
+
+@test "security: a Dockerfile added since the last version is not compared" {
+	export AUTO_RELEASE_STRATEGY=security
+	git tag v1.2.3
+	dockerfile 'FROM alpine:3.24.4'
+	commit "feat: add a Dockerfile"
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+	[[ "$stderr" == *"Dockerfile is new since v1.2.3"* ]]
+}
+
+@test "security: an unresolvable base image is skipped with a warning" {
+	export AUTO_RELEASE_STRATEGY=security
+	dockerfile 'ARG BASE' 'FROM ${BASE}'
+	commit "feat: add a Dockerfile"
+	git tag v1.2.3
+	dockerfile 'ARG BASE' 'FROM ${BASE}' 'RUN true'
 	commit "fix(security): update requests to 2.33.0"
 	run --separate-stderr "$AUTO_RELEASE" plan
 	[ "$status" -eq 0 ]
-	[[ "$stderr" == *"cannot scan ghcr.io/example/app:1.2.3"* ]]
+	[[ "$stderr" == *"cannot resolve the base image of Dockerfile"* ]]
 	[[ "$output" == "## v1.2.4"* ]]
+}
+
+@test "security: a base image that cannot be scanned skips only that check" {
+	export AUTO_RELEASE_STRATEGY=security
+	export STUB_VULNS_3_24_4=""
+	dockerfile 'FROM alpine:3.24.3'
+	commit "feat: add a Dockerfile"
+	git tag v1.2.3
+	dockerfile 'FROM alpine:3.24.4'
+	commit "fix(security): update requests to 2.33.0"
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$stderr" == *"cannot scan alpine:3.24.3"* ]]
+	[[ "$output" == "## v1.2.4"* ]]
+	[[ "$output" != *"Security fixes in the image"* ]]
 }
 
 @test "security: a breaking fix(security) still bumps by the commit rules" {
