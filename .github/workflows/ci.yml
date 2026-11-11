@@ -2,7 +2,7 @@ name: CI
 
 "on":
   push:
-    branches: ["**"]
+    branches: [main]
     tags: ["v*.*.*"]
   pull_request:
   schedule:
@@ -52,9 +52,12 @@ jobs:
 
   docker:
     needs: test
-    uses: mbologna/.github/.github/workflows/docker-ci.yml@122054e64bfe58b04c228a18865fe52116885f70 # main
+    uses: mbologna/.github/.github/workflows/docker-ci.yml@92e06b193222ca7eaaa49380dc25e027d4b7987d # main
     with:
       image_name: auto-release
+      # Only release tags publish the image (auto-release dispatches
+      # their build); pull requests build it without pushing.
+      publish: release
       push_to_dockerhub: false
       enable_cosign: true
       enable_release_drafter: true
@@ -75,7 +78,7 @@ jobs:
     permissions:
       contents: write
       actions: write
-    uses: mbologna/.github/.github/workflows/auto-release.yml@122054e64bfe58b04c228a18865fe52116885f70 # main
+    uses: mbologna/.github/.github/workflows/auto-release.yml@92e06b193222ca7eaaa49380dc25e027d4b7987d # main
     with:
       strategy: conventional
       image: ghcr.io/mbologna/auto-release
