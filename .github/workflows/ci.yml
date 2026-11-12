@@ -58,13 +58,20 @@ jobs:
       attestations: write
       security-events: write
       actions: write
-    uses: mbologna/.github/.github/workflows/docker-ci.yml@cce288528e7d82ce11274df5ea07837844a1c9f1 # main
+    uses: mbologna/.github/.github/workflows/docker-ci.yml@8afa698d74ff2cbfdb96ee637825753be6a15aa3 # main
     with:
       image_name: auto-release
       # Only release tags publish the image (auto-release dispatches
       # their build); pull requests build it without pushing.
       publish: release
       push_to_dockerhub: false
+      # A CI job image (README, "Image policy check"): GitHub's container:
+      # and GitLab's image: run the job as the image's user and write the
+      # checked-out workspace, and git (tags, history) is the job.
+      allowed_tools: git
+      allow_root: >-
+        CI job image: GitHub's container: and GitLab's image: run the job
+        as the image's user, which writes the checked-out workspace
       # auto-release runs inside docker-ci: Monday's schedule releases with
       # this strategy, a push to main only a CVE fix.
       release_strategy: conventional
