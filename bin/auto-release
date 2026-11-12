@@ -11,6 +11,10 @@
 #   AUTO_RELEASE_IMAGE               docker: image to compare (GitLab: $CI_REGISTRY_IMAGE)
 #   AUTO_RELEASE_DOCKERFILES         security: Dockerfiles whose base image to compare,
 #                                    separated by spaces or commas (default Dockerfile)
+#   AUTO_RELEASE_REBUILD_DAYS        commits, conventional, security: release a fresh
+#                                    rebuild when the last release is this many days old
+#                                    and its image has fixable findings its base lacks
+#                                    (default 7; 0 disables)
 #   AUTO_RELEASE_BASE_IMAGE_PATTERN  egrep pattern; matching Dockerfile lines go into the notes
 #   AUTO_RELEASE_TOKEN               token that pushes the tag and creates the Release
 #                                    (GitHub/Forgejo fall back to GITHUB_TOKEN)
@@ -196,11 +200,15 @@ has_security_commits() {
 
 # Fixable HIGH/CRITICAL findings of an image as sorted "CVE package" lines,
 # the same filter image-cve-alert reports with. A .trivyignore in the checkout
-# applies (trivy reads it by default). Fails when the image cannot be scanned.
+# applies (trivy reads it by default). With a second argument "os", only the
+# distribution's packages (apk, apt) count. Fails when the image cannot be
+# scanned.
 image_vulns() {
 	json=$(trivy image --quiet --image-src remote --scanners vuln --ignore-unfixed \
 		--severity "${AUTO_RELEASE_SEVERITY:-HIGH,CRITICAL}" --format json "$1") || return 1
-	printf '%s' "$json" | jq -r '.Results[]?.Vulnerabilities[]? | "\(.VulnerabilityID) \(.PkgName)"' | sort -u
+	printf '%s' "$json" | jq -r --arg only "${2:-}" '.Results[]? |
+		select($only != "os" or .Class == "os-pkgs") |
+		.Vulnerabilities[]? | "\(.VulnerabilityID) \(.PkgName)"' | sort -u
 }
 
 # The Dockerfiles whose base image the security strategy compares:
@@ -321,6 +329,89 @@ base_image_fixes_cves() {
 	SECURITY_NOTE=$(printf '%s\n' "$all_fixed" | grep . | sort -u | awk '{printf "- %s in `%s`\n", $1, $2}')
 }
 
+# AUTO_RELEASE_REBUILD_DAYS as a plain number; 7 when unset or empty.
+rebuild_days() {
+	d=${AUTO_RELEASE_REBUILD_DAYS:-7}
+	case $d in *[!0-9]*) die "AUTO_RELEASE_REBUILD_DAYS must be a whole number of days, 0 to disable; got '$d'" ;; esac
+	d=$(printf '%s' "$d" | sed 's/^0*//')
+	printf '%s' "${d:-0}"
+}
+
+# When a tag was made: the tagger date of an annotated tag, which auto-release
+# pushes, or the commit date of a lightweight one, which can only be earlier.
+tag_time() {
+	git for-each-ref --format='%(creatordate:unix)' "refs/tags/$1"
+}
+
+# The Dockerfile AUTO_RELEASE_IMAGE is built from: the only listed one that
+# exists at the last tag. Fails, saying why, when several do, since the image
+# cannot be matched to one of them; fails quietly when none does.
+release_dockerfile() {
+	found="" several=""
+	for df in $(dockerfiles); do
+		df=${df#./}
+		git cat-file -e "$1:./$df" 2>/dev/null || continue
+		[ -z "$found" ] || several=true
+		found=$df
+	done
+	if [ -n "$several" ]; then
+		log "Fresh rebuild check: several Dockerfiles but one AUTO_RELEASE_IMAGE, which cannot be matched to one of them; skipping"
+		return 1
+	fi
+	[ -n "$found" ] || return 1
+	printf '%s' "$found"
+}
+
+# Fresh rebuild: the image of the last release has fixable HIGH/CRITICAL
+# findings in packages its Dockerfile installs (apk add, apt-get install
+# without versions), which a build from scratch picks up once the distribution
+# ships the fix, while nothing in the repository changes to trigger one. A
+# finding counts when it is in an OS package of ${AUTO_RELEASE_IMAGE}:<last
+# version> and not in the final-stage base image at the last tag, whose own
+# fixes need a base image update instead. Language packages are left out:
+# lock files and pinned versions keep them as they are, so a rebuild would
+# not fix them. Only when the last tag is AUTO_RELEASE_REBUILD_DAYS old, so a
+# fix that is not out yet costs one release per period, not one per run.
+# Sets REBUILD_NOTE. Skips, never failing the run, when anything cannot be
+# resolved or scanned.
+rebuild_fixes_cves() {
+	days=$(rebuild_days)
+	[ "$days" -gt 0 ] || return 1
+	df=$(release_dockerfile "$1") || return 1
+	if [ -z "${AUTO_RELEASE_IMAGE:-}" ]; then
+		log "Fresh rebuild check: no AUTO_RELEASE_IMAGE to scan; skipping"
+		return 1
+	fi
+	age=$(($(date +%s) - $(tag_time "$1")))
+	if [ "$age" -lt $((days * 86400)) ]; then
+		log "Fresh rebuild check: $1 is $((age / 86400)) days old, under AUTO_RELEASE_REBUILD_DAYS=$days"
+		return 1
+	fi
+	if ! base=$(git show "$1:./$df" | dockerfile_base); then
+		log "warning: cannot resolve the base image of $df in $1 (an ARG without a default?); skipping the fresh rebuild check"
+		return 1
+	fi
+	image="${AUTO_RELEASE_IMAGE}:${1#v}"
+	registry_login
+	if ! released=$(image_vulns "$image" os); then
+		log "warning: cannot scan $image; skipping the fresh rebuild check"
+		return 1
+	fi
+	from_base=""
+	if [ -n "$base" ] && ! from_base=$(image_vulns "$base" os); then
+		log "warning: cannot scan $base; skipping the fresh rebuild check"
+		return 1
+	fi
+	added=$(printf '%s\n' "$released" | grep -vxF -f "$(printf '%s\n' "$from_base" | tmpfile)" | grep . || true)
+	log "Fixable HIGH/CRITICAL in OS packages of $image: $(printf '%s' "$released" | grep -c . || true), of its base ${base:-scratch}: $(printf '%s' "$from_base" | grep -c . || true)"
+	if [ -z "$added" ]; then
+		log "Fresh rebuild check: none in the packages $df installs"
+		return 1
+	fi
+	log "Fresh rebuild check: $1 is $((age / 86400)) days old and a rebuild should fix $(printf '%s\n' "$added" | grep -c .) findings"
+	REBUILD_NOTE=$(printf '%s\n' "$added" | awk '{printf "- %s in `%s`\n", $1, $2}')
+}
+
 tmpfile() {
 	f=$(mktemp)
 	cat >"$f"
@@ -358,7 +449,8 @@ cliff() {
 
 # Sets NEEDED, NEXT_TAG, NOTES_FILE.
 plan() {
-	NEEDED=false NEXT_TAG="" DIGEST_NOTE="" SECURITY_NOTE=""
+	NEEDED=false NEXT_TAG="" DIGEST_NOTE="" SECURITY_NOTE="" REBUILD_NOTE=""
+	rebuild_days >/dev/null
 	LATEST_TAG=$(latest_tag)
 	if [ -z "$LATEST_TAG" ]; then
 		log "No vX.Y.Z tag found: push an initial tag by hand to bootstrap. Skipping."
@@ -372,12 +464,20 @@ plan() {
 	case $STRATEGY in
 	commits)
 		[ "$count" -gt 0 ] && NEEDED=true
+		if rebuild_fixes_cves "$LATEST_TAG"; then
+			NEEDED=true
+		fi
 		;;
 	conventional)
 		if [ "$count" -gt 0 ] && has_releasable_commits "$LATEST_TAG"; then
 			NEEDED=true
 		elif [ "$count" -gt 0 ]; then
 			log "No feat/fix/perf/revert or breaking commit since $LATEST_TAG."
+		fi
+		# The weekly run is what catches a fix the distribution shipped
+		# while the repository stood still.
+		if rebuild_fixes_cves "$LATEST_TAG"; then
+			NEEDED=true
 		fi
 		;;
 	docker)
@@ -396,12 +496,16 @@ plan() {
 		;;
 	security)
 		# Runs on every push, outside the weekly rhythm: release at once only
-		# for a CVE fix, either a Renovate fix(security) update or an image
-		# whose rebuild dropped fixable HIGH/CRITICAL findings.
+		# for a CVE fix, either a Renovate fix(security) update, a base image
+		# update that drops fixable HIGH/CRITICAL findings, or a fresh
+		# rebuild that should drop them from the packages the image adds.
 		if [ "$count" -gt 0 ] && has_security_commits "$LATEST_TAG"; then
 			NEEDED=true
 		fi
 		if base_image_fixes_cves "$LATEST_TAG"; then
+			NEEDED=true
+		fi
+		if rebuild_fixes_cves "$LATEST_TAG"; then
 			NEEDED=true
 		fi
 		[ "$NEEDED" = true ] || log "No security fix since $LATEST_TAG."
@@ -432,8 +536,15 @@ plan() {
 
 	NOTES_FILE=$(mktemp)
 	{
+		if [ -n "$SECURITY_NOTE$REBUILD_NOTE" ]; then
+			printf '### Security fixes in the image\n\n'
+		fi
 		if [ -n "$SECURITY_NOTE" ]; then
-			printf '### Security fixes in the image\n\n%s\n\n' "$SECURITY_NOTE"
+			printf '%s\n\n' "$SECURITY_NOTE"
+		fi
+		if [ -n "$REBUILD_NOTE" ]; then
+			printf 'A fresh build of the packages the image installs on top of its base image is expected to fix these findings of %s:\n\n%s\n\n' \
+				"$LATEST_TAG" "$REBUILD_NOTE"
 		fi
 		if [ -n "$DIGEST_NOTE" ]; then
 			printf '%s\n\n' "$DIGEST_NOTE"
@@ -480,8 +591,12 @@ report() {
 
 release() {
 	[ -n "$FORGE_TOKEN" ] || die "no token: set AUTO_RELEASE_TOKEN (GitHub and Forgejo also take GITHUB_TOKEN)"
-	# Lightweight, whatever the runner's config says about signing tags.
-	git -c tag.gpgSign=false tag "$NEXT_TAG"
+	# Annotated, so the tag records when it was made (the fresh rebuild
+	# check counts days from it), and unsigned, whatever the runner's config
+	# says. A job container often has no git identity: fall back to one.
+	git var GIT_COMMITTER_IDENT >/dev/null 2>&1 ||
+		set -- -c user.name=auto-release -c user.email=auto-release@localhost
+	git "$@" -c tag.gpgSign=false -c tag.forceSignAnnotated=false tag -a -m "$NEXT_TAG" "$NEXT_TAG"
 	if ! out=$(git push --quiet "$PUSH_URL" "refs/tags/${NEXT_TAG}" 2>&1); then
 		printf '%s\n' "$out" | sed "s|${FORGE_TOKEN}|***|g" >&2
 		die "pushing $NEXT_TAG failed"
