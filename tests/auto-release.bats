@@ -16,7 +16,7 @@ setup() {
 	unset GITHUB_ACTIONS GITLAB_CI FORGEJO_ACTIONS GITEA_ACTIONS GITHUB_OUTPUT GITHUB_STEP_SUMMARY
 	unset GITHUB_REF CI_COMMIT_TAG
 	unset AUTO_RELEASE_STRATEGY AUTO_RELEASE_IMAGE AUTO_RELEASE_TOKEN AUTO_RELEASE_DRY_RUN
-	unset AUTO_RELEASE_DOCKERFILES
+	unset AUTO_RELEASE_DOCKERFILES AUTO_RELEASE_REBUILD_DAYS
 
 	mkdir -p stubs
 	cat >stubs/curl <<-'EOF'
@@ -48,15 +48,18 @@ setup() {
 		# trivy image ... IMAGE:TAG -> JSON with STUB_VULNS_<TAG> ("CVE pkg;CVE pkg"),
 		# or a scan failure when STUB_VULNS_<TAG> is unset. <TAG> is the part
 		# after the last colon (the digest for IMAGE:TAG@sha256:...), other
-		# characters than letters and digits turned into _. Logs each image.
+		# characters than letters and digits turned into _. A finding is in an
+		# OS package unless a third word names its class ("CVE pkg lang-pkgs").
+		# Logs each image.
 		for last; do :; done
 		printf '%s\n' "$last" >>"$TRIVY_LOG"
 		tag=$(printf '%s' "${last##*:}" | tr -c 'A-Za-z0-9' _)
 		eval "set -- \${STUB_VULNS_$tag+x}"
 		[ -n "${1:-}" ] || { echo "image not found" >&2; exit 1; }
 		eval "v=\$STUB_VULNS_$tag"
-		printf '%s' "$v" | tr ';' '\n' | jq -R -s -c \
-			'{Results: [{Vulnerabilities: [split("\n")[] | select(length > 0) | split(" ") | {VulnerabilityID: .[0], PkgName: .[1]}]}]}'
+		printf '%s' "$v" | tr ';' '\n' | jq -R -s -c '{Results: [split("\n")[] | select(length > 0) |
+			split(" ") | {Class: (.[2] // "os-pkgs"), VulnerabilityID: .[0], PkgName: .[1]}] |
+			group_by(.Class) | map({Class: .[0].Class, Vulnerabilities: map(del(.Class))})}'
 	EOF
 	chmod +x stubs/*
 	export PATH="$BATS_TEST_TMPDIR/stubs:$PATH" STUB_LOG="$BATS_TEST_TMPDIR/stub.log"
@@ -79,6 +82,12 @@ dockerfile() {
 	mkdir -p "$(dirname "$path")"
 	printf '%s\n' "$@" >"$path"
 	git add "$path"
+}
+
+# Tags HEAD with an annotated tag, as auto-release does, made DAYS (default 8)
+# days ago.
+old_tag() {
+	GIT_COMMITTER_DATE="$(($(date +%s) - ${2:-8} * 86400)) +0000" git tag -a -m "$1" "$1"
 }
 
 # Runs plan and leaves the proposed tag (or "none") in $next.
@@ -619,4 +628,152 @@ next_tag() {
 	commit "fix(security)!: drop TLS 1.1"
 	next_tag
 	[ "$next" = v2.0.0 ]
+}
+
+@test "rebuild: a finding only in the packages the image adds releases a patch, listing it" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_1_2_3="CVE-2026-1 openssl;CVE-2026-5 curl;CVE-2026-6 nghttp2"
+	export STUB_VULNS_3_24_3="CVE-2026-1 openssl"
+	dockerfile 'FROM alpine:3.24.3' 'RUN apk add --no-cache curl'
+	commit "feat: add a Dockerfile"
+	old_tag v1.2.3
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$output" == "## v1.2.4"* ]]
+	[[ "$output" == *"### Security fixes in the image"* ]]
+	[[ "$output" == *"expected to fix these findings of v1.2.3"* ]]
+	[[ "$output" == *'- CVE-2026-5 in `curl`'* ]]
+	[[ "$output" == *'- CVE-2026-6 in `nghttp2`'* ]]
+	[[ "$output" != *"CVE-2026-1"* ]]
+	[[ "$output" == *"No commits since v1.2.3."* ]]
+	grep -qx ghcr.io/example/app:1.2.3 "$TRIVY_LOG"
+	grep -qx alpine:3.24.3 "$TRIVY_LOG"
+}
+
+@test "rebuild: findings the base image has too do not release" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_1_2_3="CVE-2026-1 openssl" STUB_VULNS_3_24_3="CVE-2026-1 openssl;CVE-2026-2 zlib"
+	dockerfile 'FROM alpine:3.24.3' 'RUN apk add --no-cache curl'
+	commit "feat: add a Dockerfile"
+	old_tag v1.2.3
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+	[[ "$stderr" == *"Fresh rebuild check: none in the packages Dockerfile installs"* ]]
+}
+
+@test "rebuild: language packages do not count, a rebuild keeps their versions" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_1_2_3="CVE-2026-7 requests lang-pkgs" STUB_VULNS_3_14_slim=""
+	dockerfile 'FROM python:3.14-slim' 'RUN pip install requests==2.0.0'
+	commit "feat: add a Dockerfile"
+	old_tag v1.2.3
+	next_tag
+	[ "$next" = none ]
+}
+
+@test "rebuild: a release younger than AUTO_RELEASE_REBUILD_DAYS is not scanned" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_1_2_3="CVE-2026-5 curl" STUB_VULNS_3_24_3=""
+	dockerfile 'FROM alpine:3.24.3' 'RUN apk add --no-cache curl'
+	commit "feat: add a Dockerfile"
+	old_tag v1.2.3 6
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+	[[ "$stderr" == *"v1.2.3 is 6 days old, under AUTO_RELEASE_REBUILD_DAYS=7"* ]]
+	[ ! -s "$TRIVY_LOG" ]
+}
+
+@test "rebuild: AUTO_RELEASE_REBUILD_DAYS sets the age, 0 disables the check" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_1_2_3="CVE-2026-5 curl" STUB_VULNS_3_24_3=""
+	dockerfile 'FROM alpine:3.24.3' 'RUN apk add --no-cache curl'
+	commit "feat: add a Dockerfile"
+	old_tag v1.2.3 6
+	AUTO_RELEASE_REBUILD_DAYS=5 next_tag
+	[ "$next" = v1.2.4 ]
+	: >"$TRIVY_LOG"
+	AUTO_RELEASE_REBUILD_DAYS=0 next_tag
+	[ "$next" = none ]
+	[ ! -s "$TRIVY_LOG" ]
+	AUTO_RELEASE_REBUILD_DAYS=weekly run "$AUTO_RELEASE" plan
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"AUTO_RELEASE_REBUILD_DAYS must be a whole number"* ]]
+}
+
+@test "rebuild: an image that cannot be scanned skips the check" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_3_24_3=""
+	dockerfile 'FROM alpine:3.24.3' 'RUN apk add --no-cache curl'
+	commit "feat: add a Dockerfile"
+	old_tag v1.2.3
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+	[[ "$stderr" == *"cannot scan ghcr.io/example/app:1.2.3; skipping the fresh rebuild check"* ]]
+	unset STUB_VULNS_3_24_3
+	export STUB_VULNS_1_2_3="CVE-2026-5 curl"
+	commit "fix(security): update requests to 2.33.0"
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$stderr" == *"cannot scan alpine:3.24.3; skipping the fresh rebuild check"* ]]
+	[[ "$output" == "## v1.2.4"* ]]
+	[[ "$output" != *"Security fixes in the image"* ]]
+}
+
+@test "rebuild: several Dockerfiles with one image are skipped" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export AUTO_RELEASE_DOCKERFILES="Dockerfile-master Dockerfile-minion"
+	export STUB_VULNS_1_2_3="CVE-2026-5 curl" STUB_VULNS_3_24_3=""
+	DOCKERFILE=Dockerfile-master dockerfile 'FROM alpine:3.24.3'
+	DOCKERFILE=Dockerfile-minion dockerfile 'FROM alpine:3.24.3'
+	commit "feat: add the images"
+	old_tag v1.2.3
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+	[[ "$stderr" == *"several Dockerfiles but one AUTO_RELEASE_IMAGE"* ]]
+	[ ! -s "$TRIVY_LOG" ]
+}
+
+@test "rebuild: the scheduled conventional run releases without feat or fix commits" {
+	export AUTO_RELEASE_STRATEGY=conventional AUTO_RELEASE_IMAGE=registry.gitlab.com/example/app
+	export STUB_VULNS_1_2_3="CVE-2026-5 curl" STUB_VULNS_aaa=""
+	dockerfile 'FROM debian:13-slim@sha256:aaa' 'RUN apt-get install -y curl'
+	# A lightweight tag, as before 0.4.0, counts from its commit's date.
+	GIT_COMMITTER_DATE="$(($(date +%s) - 30 * 86400)) +0000" commit "feat: add a Dockerfile"
+	git tag v1.2.3
+	commit "chore(deps): update a dev tool"
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$stderr" == *"No feat/fix/perf/revert or breaking commit since v1.2.3."* ]]
+	[[ "$output" == "## v1.2.4"* ]]
+	[[ "$output" == *'- CVE-2026-5 in `curl`'* ]]
+	[[ "$output" == *"update a dev tool"* ]]
+	grep -qx 'debian:13-slim@sha256:aaa' "$TRIVY_LOG"
+}
+
+@test "rebuild: the release tag is annotated, so the next run waits a week" {
+	export GITHUB_ACTIONS=true GITHUB_REPOSITORY=example/app GITHUB_TOKEN=secret AUTO_RELEASE_DISPATCH=false
+	export AUTO_RELEASE_PUSH_URL="$BATS_TEST_TMPDIR/remote.git"
+	export AUTO_RELEASE_STRATEGY=conventional AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_1_2_3="CVE-2026-5 curl" STUB_VULNS_1_2_4="CVE-2026-5 curl" STUB_VULNS_3_24_3=""
+	# A job container without a git identity.
+	unset GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+	export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.useConfigOnly GIT_CONFIG_VALUE_0=true
+	dockerfile 'FROM alpine:3.24.3' 'RUN apk add --no-cache curl'
+	GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com commit "feat: add a Dockerfile"
+	old_tag_identity() { GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com old_tag "$@"; }
+	old_tag_identity v1.2.3
+	run --separate-stderr "$AUTO_RELEASE" release
+	[ "$status" -eq 0 ]
+	[ "$(git cat-file -t v1.2.4)" = tag ]
+	[[ "$(git cat-file -p v1.2.4)" == *"tagger auto-release <auto-release@localhost>"* ]]
+	[ -n "$(git ls-remote --tags "$BATS_TEST_TMPDIR/remote.git" 'v1.2.4^{}')" ]
+	grep -q '"body":"### Security fixes in the image' "$STUB_LOG"
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+	[[ "$stderr" == *"v1.2.4 is 0 days old"* ]]
 }
