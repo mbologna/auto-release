@@ -58,13 +58,14 @@ jobs:
       attestations: write
       security-events: write
       actions: write
-    uses: mbologna/.github/.github/workflows/docker-ci.yml@cce288528e7d82ce11274df5ea07837844a1c9f1 # main
+    uses: mbologna/.github/.github/workflows/docker-ci.yml@0d83a4dae311501f537bbe18ab434359df3a9524 # feat/image-policy
     with:
       image_name: auto-release
       # Only release tags publish the image (auto-release dispatches
       # their build); pull requests build it without pushing.
       publish: release
       push_to_dockerhub: false
+      skip_paths: ""  # TEMP: force a build to test the image policy check
       # auto-release runs inside docker-ci: Monday's schedule releases with
       # this strategy, a push to main only a CVE fix.
       release_strategy: conventional
