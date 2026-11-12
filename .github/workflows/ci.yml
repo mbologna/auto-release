@@ -58,14 +58,13 @@ jobs:
       attestations: write
       security-events: write
       actions: write
-    uses: mbologna/.github/.github/workflows/docker-ci.yml@bfc602f11d8228e1217398dfb3cd3fd1c0276407 # feat/image-policy
+    uses: mbologna/.github/.github/workflows/docker-ci.yml@8afa698d74ff2cbfdb96ee637825753be6a15aa3 # main
     with:
       image_name: auto-release
       # Only release tags publish the image (auto-release dispatches
       # their build); pull requests build it without pushing.
       publish: release
       push_to_dockerhub: false
-      skip_paths: ""  # TEMP: force a build to test the image policy check
       # A CI job image (README, "Image policy check"): GitHub's container:
       # and GitLab's image: run the job as the image's user and write the
       # checked-out workspace, and git (tags, history) is the job.
