@@ -12,18 +12,18 @@ It keeps what the earlier tools each did well. Like the old `auto-release` workf
    | Strategy | Releases when |
    |---|---|
    | `commits` (default) | any commit landed since the tag, or a [fresh rebuild](#fresh-rebuilds) is due |
-   | `conventional` | a `feat`, `fix`, `perf` or `revert` commit, or a breaking change, landed since the tag, or a [fresh rebuild](#fresh-rebuilds) is due; `docs`, `chore`, `ci` and the rest alone do not release |
+   | `conventional` | a `feat`, `fix`, `perf` or `revert` commit, or a breaking change, landed since the tag, a [maintenance release](#maintenance-releases) is due (dependency updates to runtime inputs, once the last release is a week old), or a [fresh rebuild](#fresh-rebuilds) is due; `docs`, `chore`, `ci` and the rest alone do not release |
    | `docker` | the registry's `latest` image digest differs from the image tagged with the last version, or that version was never published |
    | `security` | a `fix(security)` commit landed (Renovate's CVE updates), the base image of a Dockerfile changed and the new one no longer has fixable HIGH/CRITICAL [Trivy](https://trivy.dev/) findings that the old one has, or a [fresh rebuild](#fresh-rebuilds) is due; the notes list those CVEs. See [The security strategy](#the-security-strategy) |
 
-3. [git-cliff](https://git-cliff.org/) computes the bump. A breaking change (`type!:` or a `BREAKING CHANGE:` footer) bumps the major, even before 1.0.0. A `feat` bumps the minor, and anything else the patch. `docker` always bumps the patch.
+3. [git-cliff](https://git-cliff.org/) computes the bump. A breaking change (`type!:` or a `BREAKING CHANGE:` footer) bumps the major, even before 1.0.0. A `feat` bumps the minor, and anything else the patch. `docker` and maintenance releases always bump the patch.
 4. `auto-release release` pushes the tag (an annotated one, which records when it was made), creates the Release and, on GitHub and Forgejo, starts the tag build (see [Tokens](#tokens)). `auto-release plan` prints the version and notes and changes nothing.
 
 ## Release notes
 
 The bundled [`share/auto-release/cliff.toml`](share/auto-release/cliff.toml) groups commits under Breaking changes, Features, Security (`*(security):`), Fixes, Performance, Reverts, Dependencies (`fix|chore|build(deps):`) and Other changes. Commits that do not follow Conventional Commits go under Other changes. Merge commits, `chore(release)` commits and Renovate digest and lock-file refreshes are left out. Each line links to its commit, and the notes end with a compare link.
 
-The `security` strategy puts the CVEs that a base image update fixed under "Security fixes in the image" at the top, and a fresh rebuild lists there the CVEs it is expected to fix. The `docker` strategy adds the new image digest there. When the base image pattern is set, the matching `Dockerfile` lines are added too.
+The `security` strategy puts the CVEs that a base image update fixed under "Security fixes in the image" at the top, and a fresh rebuild lists there the CVEs it is expected to fix. A maintenance release starts with "Maintenance release" and the runtime inputs that changed; its `chore(deps)` commits are under Dependencies as usual. The `docker` strategy adds the new image digest there. When the base image pattern is set, the matching `Dockerfile` lines are added too.
 
 A repository can provide its own `cliff.toml`, or point `AUTO_RELEASE_CONFIG` at one. The tag pattern is always passed on the command line.
 
@@ -41,6 +41,15 @@ Trivy reads registry credentials from the Docker config (`~/.docker/config.json`
 A repository with more than one image, or a Dockerfile outside the root, lists them all, separated by spaces or commas and relative to the repository root: `AUTO_RELEASE_DOCKERFILES: "Dockerfile tools/Dockerfile"`. The GitHub wrapper and the GitLab component take it as their `dockerfiles` input; on Forgejo, set it in the step's `env`. The base image tag or digest has to change in the Dockerfile for this check to see it. A floating tag such as `alpine:3` that moves upstream goes unnoticed, so pin digests and let Renovate move them.
 
 Before 0.3.0 this check compared the image of the last version with the registry's `latest`, which meant building and pushing `latest` on every push. That comparison is gone: `AUTO_RELEASE_IMAGE` matters for the `docker` strategy, the registry login and the fresh rebuild below.
+
+## Maintenance releases
+
+Dependency updates are `chore(deps)` commits, which release nothing under `conventional`. Without more, an update to a library or a base image would wait for the next `feat` or `fix`, which in a quiet repository may never come. A scheduled `conventional` run with no `feat`, `fix`, `perf`, `revert` or breaking commit since the last tag therefore releases a patch when both of these hold:
+
+- Unreleased commits changed a runtime input: a file matching `AUTO_RELEASE_RUNTIME_PATHS`, by default `Dockerfile*`, `uv.lock`, `requirements*.txt`, `pyproject.toml`, `package.json`, `package-lock.json`, `go.mod`, `go.sum` and `composer.*`. A pattern without a `/` matches the file name in any directory (`Dockerfile*` covers `tools/Dockerfile`), one with a `/` the path from the repository root. The net change since the tag counts, so an update reverted before the run changes nothing. CI, documentation and development-tool changes (`.github/`, `.gitlab-ci.yml`, `.pre-commit-config.yaml`) never release.
+- The last release tag is at least `AUTO_RELEASE_MAINTENANCE_DAYS` days old (default 7, `0` turns maintenance releases off). With weekly dependency updates that is at most one maintenance release a week, and a repository whose runtime inputs did not change never rebuilds.
+
+The notes list the runtime inputs that changed, then the commits as usual, with the dependency updates under Dependencies. Security fixes do not wait for this: the `security` strategy still releases a `fix(security)` commit, a base image fix or a fresh rebuild at once.
 
 ## Fresh rebuilds
 
@@ -141,6 +150,8 @@ jobs:
 | `AUTO_RELEASE_DOCKERFILES` | Dockerfiles whose final base image the `security` strategy compares, separated by spaces or commas; default `Dockerfile`; missing ones are skipped |
 | `AUTO_RELEASE_IMAGE` | image without a tag that the `docker` strategy compares and the fresh rebuild scans at the last version; GitLab defaults to `$CI_REGISTRY_IMAGE`. auto-release logs in to its registry with the forge's token |
 | `AUTO_RELEASE_REBUILD_DAYS` | days after the last release when a [fresh rebuild](#fresh-rebuilds) may release; default 7, `0` turns it off |
+| `AUTO_RELEASE_MAINTENANCE_DAYS` | days after the last release when a [maintenance release](#maintenance-releases) may release; default 7, `0` turns it off |
+| `AUTO_RELEASE_RUNTIME_PATHS` | the runtime inputs whose changes a maintenance release ships: shell patterns separated by spaces or commas; default `Dockerfile* uv.lock requirements*.txt pyproject.toml package.json package-lock.json go.mod go.sum composer.*` |
 | `AUTO_RELEASE_BASE_IMAGE_PATTERN` | extended regular expression; matching `Dockerfile` lines go into the notes |
 | `AUTO_RELEASE_TOKEN` | token that pushes the tag and creates the Release; GitHub and Forgejo fall back to `GITHUB_TOKEN` |
 | `AUTO_RELEASE_DISPATCH` | `false` skips starting the tag build |
