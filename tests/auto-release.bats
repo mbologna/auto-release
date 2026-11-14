@@ -17,6 +17,7 @@ setup() {
 	unset GITHUB_REF CI_COMMIT_TAG
 	unset AUTO_RELEASE_STRATEGY AUTO_RELEASE_IMAGE AUTO_RELEASE_TOKEN AUTO_RELEASE_DRY_RUN
 	unset AUTO_RELEASE_DOCKERFILES AUTO_RELEASE_REBUILD_DAYS
+	unset AUTO_RELEASE_MAINTENANCE_DAYS AUTO_RELEASE_RUNTIME_PATHS
 
 	mkdir -p stubs
 	cat >stubs/curl <<-'EOF'
@@ -82,6 +83,19 @@ dockerfile() {
 	mkdir -p "$(dirname "$path")"
 	printf '%s\n' "$@" >"$path"
 	git add "$path"
+}
+
+# Appends a line to each file (creating it and its directory) and commits
+# them: touch_commit MESSAGE FILE...
+touch_commit() {
+	msg=$1
+	shift
+	for f; do
+		mkdir -p "$(dirname "$f")"
+		echo "$msg" >>"$f"
+		git add "$f"
+	done
+	git commit -q -m "$msg"
 }
 
 # Tags HEAD with an annotated tag, as auto-release does, made DAYS (default 8)
@@ -776,4 +790,125 @@ next_tag() {
 	[ "$status" -eq 0 ]
 	[ -z "$output" ]
 	[[ "$stderr" == *"v1.2.4 is 0 days old"* ]]
+}
+
+@test "maintenance: tooling-only changes do not release" {
+	export AUTO_RELEASE_STRATEGY=conventional
+	old_tag v1.2.3 30
+	touch_commit "ci: run the tests on pull requests" .github/workflows/ci.yml
+	touch_commit "chore(deps): update ruff to 0.15.2" .pre-commit-config.yaml
+	touch_commit "docs: explain the flags" README.md docs/usage.md
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+	[[ "$stderr" == *"Maintenance release: no runtime input changed since v1.2.3"* ]]
+}
+
+@test "maintenance: a runtime change one day under the threshold does not release" {
+	export AUTO_RELEASE_STRATEGY=conventional
+	old_tag v1.2.3 6
+	touch_commit "chore(deps): update requests from 2.32.0 to 2.33.0" uv.lock
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+	[[ "$stderr" == *"runtime inputs changed, but v1.2.3 is 6 days old, under 7 days"* ]]
+}
+
+@test "maintenance: a runtime change at the threshold releases a patch, listing the updates" {
+	export AUTO_RELEASE_STRATEGY=conventional
+	old_tag v1.2.3 7
+	touch_commit "chore(deps): update requests from 2.32.0 to 2.33.0" uv.lock pyproject.toml
+	touch_commit "chore(deps): update python from 3.15.0 to 3.15.1" Dockerfile
+	touch_commit "ci: cache the virtualenv" .gitlab-ci.yml
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$output" == "## v1.2.4"* ]]
+	[[ "$stderr" == *"Maintenance release: v1.2.3 is 7 days old and runtime inputs changed"* ]]
+	notes=$(printf '%s\n' "$output" | sed -E 's/ \([0-9a-f]{7}\)$//')
+	expected=$(
+		cat <<-'EOF'
+			## v1.2.4
+
+			### Maintenance release
+
+			Runtime inputs changed since v1.2.3:
+
+			- `Dockerfile`
+			- `pyproject.toml`
+			- `uv.lock`
+
+			### Dependencies
+
+			- update python from 3.15.0 to 3.15.1
+			- update requests from 2.32.0 to 2.33.0
+
+			### Other changes
+
+			- cache the virtualenv
+		EOF
+	)
+	[ "$notes" = "$expected" ]
+}
+
+@test "maintenance: a feat still releases a minor, without the maintenance section" {
+	export AUTO_RELEASE_STRATEGY=conventional
+	old_tag v1.2.3 30
+	touch_commit "chore(deps): update requests from 2.32.0 to 2.33.0" uv.lock
+	touch_commit "feat: add the --json flag" src/app.py
+	next_tag
+	[ "$next" = v1.3.0 ]
+	[[ "$output" != *"Maintenance release"* ]]
+	[[ "$output" == *"update requests from 2.32.0 to 2.33.0"* ]]
+}
+
+@test "maintenance: patterns match file names in any directory, AUTO_RELEASE_RUNTIME_PATHS replaces them" {
+	export AUTO_RELEASE_STRATEGY=conventional
+	old_tag v1.2.3 8
+	touch_commit "chore(deps): update node to 24.2.0" tools/Dockerfile.worker
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[[ "$output" == "## v1.2.4"* ]]
+	[[ "$output" == *'- `tools/Dockerfile.worker`'* ]]
+	AUTO_RELEASE_RUNTIME_PATHS="src/*, Gemfile.lock" next_tag
+	[ "$next" = none ]
+	touch_commit "chore(deps): update rack to 3.2.1" vendor/Gemfile.lock
+	AUTO_RELEASE_RUNTIME_PATHS="src/*, Gemfile.lock" next_tag
+	[ "$next" = v1.2.4 ]
+	[[ "$output" == *'- `vendor/Gemfile.lock`'* ]]
+	[[ "$output" != *"tools/Dockerfile.worker"* ]]
+}
+
+@test "maintenance: an update reverted before the release changes nothing" {
+	export AUTO_RELEASE_STRATEGY=conventional
+	echo "requests==2.32.0" >requirements.txt
+	git add requirements.txt
+	commit "chore: pin requests"
+	old_tag v1.2.3 30
+	echo "requests==2.33.0" >requirements.txt
+	git commit -q -am "chore(deps): update requests to 2.33.0"
+	echo "requests==2.32.0" >requirements.txt
+	git commit -q -am "chore(deps): roll back requests to 2.32.0"
+	next_tag
+	[ "$next" = none ]
+}
+
+@test "maintenance: AUTO_RELEASE_MAINTENANCE_DAYS sets the age, 0 disables it" {
+	export AUTO_RELEASE_STRATEGY=conventional
+	old_tag v1.2.3 3
+	touch_commit "chore(deps): update express to 5.2.0" package.json package-lock.json
+	AUTO_RELEASE_MAINTENANCE_DAYS=3 next_tag
+	[ "$next" = v1.2.4 ]
+	AUTO_RELEASE_MAINTENANCE_DAYS=0 next_tag
+	[ "$next" = none ]
+	AUTO_RELEASE_MAINTENANCE_DAYS=weekly run "$AUTO_RELEASE" plan
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"AUTO_RELEASE_MAINTENANCE_DAYS must be a whole number"* ]]
+}
+
+@test "maintenance: only conventional runs release dependency updates" {
+	old_tag v1.2.3 30
+	touch_commit "chore(deps): update golang.org/x/net to 0.40.0" go.mod go.sum
+	AUTO_RELEASE_STRATEGY=security next_tag
+	[ "$next" = none ]
+	AUTO_RELEASE_STRATEGY=conventional next_tag
+	[ "$next" = v1.2.4 ]
 }

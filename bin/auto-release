@@ -15,6 +15,15 @@
 #                                    rebuild when the last release is this many days old
 #                                    and its image has fixable findings its base lacks
 #                                    (default 7; 0 disables)
+#   AUTO_RELEASE_MAINTENANCE_DAYS    conventional: release a patch when runtime inputs
+#                                    changed and the last release is this many days old,
+#                                    even without a feat or fix commit (default 7; 0
+#                                    disables)
+#   AUTO_RELEASE_RUNTIME_PATHS       the runtime inputs: shell patterns separated by spaces
+#                                    or commas; one without a / matches a file name in any
+#                                    directory (default Dockerfile* uv.lock
+#                                    requirements*.txt pyproject.toml package.json
+#                                    package-lock.json go.mod go.sum composer.*)
 #   AUTO_RELEASE_BASE_IMAGE_PATTERN  egrep pattern; matching Dockerfile lines go into the notes
 #   AUTO_RELEASE_TOKEN               token that pushes the tag and creates the Release
 #                                    (GitHub/Forgejo fall back to GITHUB_TOKEN)
@@ -329,12 +338,69 @@ base_image_fixes_cves() {
 	SECURITY_NOTE=$(printf '%s\n' "$all_fixed" | grep . | sort -u | awk '{printf "- %s in `%s`\n", $1, $2}')
 }
 
-# AUTO_RELEASE_REBUILD_DAYS as a plain number; 7 when unset or empty.
-rebuild_days() {
-	d=${AUTO_RELEASE_REBUILD_DAYS:-7}
-	case $d in *[!0-9]*) die "AUTO_RELEASE_REBUILD_DAYS must be a whole number of days, 0 to disable; got '$d'" ;; esac
+# A variable holding a number of days, as a plain number: whole_days NAME DEFAULT.
+whole_days() {
+	eval "d=\${$1:-$2}"
+	case $d in *[!0-9]*) die "$1 must be a whole number of days, 0 to disable; got '$d'" ;; esac
 	d=$(printf '%s' "$d" | sed 's/^0*//')
 	printf '%s' "${d:-0}"
+}
+
+# AUTO_RELEASE_REBUILD_DAYS as a plain number; 7 when unset or empty.
+rebuild_days() { whole_days AUTO_RELEASE_REBUILD_DAYS 7; }
+
+# AUTO_RELEASE_MAINTENANCE_DAYS as a plain number; 7 when unset or empty.
+maintenance_days() { whole_days AUTO_RELEASE_MAINTENANCE_DAYS 7; }
+
+DEFAULT_RUNTIME_PATHS='Dockerfile* uv.lock requirements*.txt pyproject.toml package.json package-lock.json go.mod go.sum composer.*'
+
+# The files changed between a tag and HEAD that are runtime inputs, one per
+# line: those matching AUTO_RELEASE_RUNTIME_PATHS. A pattern with a / matches
+# the path from the repository root, one without a / the file name in any
+# directory, so Dockerfile* also covers tools/Dockerfile. The net change
+# counts: an update reverted before the release changed nothing.
+runtime_files() {
+	patterns=$(printf '%s\n' "${AUTO_RELEASE_RUNTIME_PATHS:-$DEFAULT_RUNTIME_PATHS}" | tr ',' ' ')
+	git diff --name-only "$1" HEAD | while IFS= read -r file; do
+		name=${file##*/}
+		set -f
+		for pattern in $patterns; do
+			case $pattern in */*) subject=$file ;; *) subject=$name ;; esac
+			# shellcheck disable=SC2254 # the pattern is meant to match
+			case $subject in $pattern)
+				printf '%s\n' "$file"
+				break
+				;;
+			esac
+		done
+		set +f
+	done
+}
+
+# Maintenance release: dependency updates (chore(deps), which release
+# nothing under conventional) still have to reach users. They do when
+# unreleased commits changed a runtime input and the last release is
+# AUTO_RELEASE_MAINTENANCE_DAYS old, so a repository whose runtime inputs
+# stand still never rebuilds, and one with weekly updates releases at most
+# once a period. Sets MAINTENANCE_NOTE.
+maintenance_due() {
+	days=$(maintenance_days)
+	if [ "$days" -eq 0 ]; then
+		log "Maintenance release: off (AUTO_RELEASE_MAINTENANCE_DAYS=0)"
+		return 1
+	fi
+	changed=$(runtime_files "$1")
+	if [ -z "$changed" ]; then
+		log "Maintenance release: no runtime input changed since $1"
+		return 1
+	fi
+	age=$(($(date +%s) - $(tag_time "$1")))
+	if [ "$age" -lt $((days * 86400)) ]; then
+		log "Maintenance release: runtime inputs changed, but $1 is $((age / 86400)) days old, under $days days"
+		return 1
+	fi
+	log "Maintenance release: $1 is $((age / 86400)) days old and runtime inputs changed"
+	MAINTENANCE_NOTE=$(printf '%s\n' "$changed" | sort -u | awk '{printf "- `%s`\n", $0}')
 }
 
 # When a tag was made: the tagger date of an annotated tag, which auto-release
@@ -449,8 +515,9 @@ cliff() {
 
 # Sets NEEDED, NEXT_TAG, NOTES_FILE.
 plan() {
-	NEEDED=false NEXT_TAG="" DIGEST_NOTE="" SECURITY_NOTE="" REBUILD_NOTE=""
+	NEEDED=false NEXT_TAG="" DIGEST_NOTE="" SECURITY_NOTE="" REBUILD_NOTE="" MAINTENANCE_NOTE=""
 	rebuild_days >/dev/null
+	maintenance_days >/dev/null
 	LATEST_TAG=$(latest_tag)
 	if [ -z "$LATEST_TAG" ]; then
 		log "No vX.Y.Z tag found: push an initial tag by hand to bootstrap. Skipping."
@@ -473,6 +540,9 @@ plan() {
 			NEEDED=true
 		elif [ "$count" -gt 0 ]; then
 			log "No feat/fix/perf/revert or breaking commit since $LATEST_TAG."
+			if maintenance_due "$LATEST_TAG"; then
+				NEEDED=true
+			fi
 		fi
 		# The weekly run is what catches a fix the distribution shipped
 		# while the repository stood still.
@@ -518,11 +588,12 @@ plan() {
 		return 0
 	fi
 
-	# docker has no commit range to classify, so it always stays patch. For the
+	# docker has no commit range to classify, so it always stays patch, and a
+	# maintenance release has no feat or breaking commit by definition. For the
 	# others git-cliff applies the Conventional Commit rules; when every commit
 	# is one the config skips (merges, chore(release)) it reports no bump, and
 	# a commit still landed, so release a patch.
-	if [ "$STRATEGY" = docker ] || [ "$count" -eq 0 ]; then
+	if [ "$STRATEGY" = docker ] || [ "$count" -eq 0 ] || [ -n "$MAINTENANCE_NOTE" ]; then
 		NEXT_TAG=$(bump "$version" patch)
 	else
 		NEXT_TAG=$(cliff --bumped-version)
@@ -545,6 +616,9 @@ plan() {
 		if [ -n "$REBUILD_NOTE" ]; then
 			printf 'A fresh build of the packages the image installs on top of its base image is expected to fix these findings of %s:\n\n%s\n\n' \
 				"$LATEST_TAG" "$REBUILD_NOTE"
+		fi
+		if [ -n "$MAINTENANCE_NOTE" ]; then
+			printf '### Maintenance release\n\nRuntime inputs changed since %s:\n\n%s\n\n' "$LATEST_TAG" "$MAINTENANCE_NOTE"
 		fi
 		if [ -n "$DIGEST_NOTE" ]; then
 			printf '%s\n\n' "$DIGEST_NOTE"
