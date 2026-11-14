@@ -17,7 +17,9 @@ setup() {
 	unset GITHUB_REF CI_COMMIT_TAG
 	unset AUTO_RELEASE_STRATEGY AUTO_RELEASE_IMAGE AUTO_RELEASE_TOKEN AUTO_RELEASE_DRY_RUN
 	unset AUTO_RELEASE_DOCKERFILES AUTO_RELEASE_REBUILD_DAYS
-	unset AUTO_RELEASE_MAINTENANCE_DAYS AUTO_RELEASE_RUNTIME_PATHS
+	unset AUTO_RELEASE_MAINTENANCE_DAYS AUTO_RELEASE_RUNTIME_PATHS AUTO_RELEASE_MAINTENANCE_DAYS_OVER_BUDGET
+	unset AUTO_RELEASE_MINUTES_BUDGET_PCT AUTO_RELEASE_MINUTES_QUOTA AUTO_RELEASE_TODAY
+	unset CI_MINUTES_TOKEN CI_SERVER_URL CI_API_GRAPHQL_URL
 
 	mkdir -p stubs
 	cat >stubs/curl <<-'EOF'
@@ -911,4 +913,149 @@ next_tag() {
 	[ "$next" = none ]
 	AUTO_RELEASE_STRATEGY=conventional next_tag
 	[ "$next" = v1.2.4 ]
+}
+
+# A GitLab job on the default branch, running Monday's conventional plan,
+# with curl answering the CI minutes query with STUB_GRAPHQL (or failing
+# when STUB_FAIL is set). The stub logs the URL, the Authorization header and
+# the body.
+gitlab_minutes() {
+	export GITLAB_CI=true CI_API_V4_URL=https://gitlab.example.com/api/v4 CI_PROJECT_ID=42
+	export CI_SERVER_HOST=gitlab.example.com CI_SERVER_URL=https://gitlab.example.com
+	export CI_PROJECT_PATH=example/app CI_PROJECT_URL=https://gitlab.example.com/example/app
+	export AUTO_RELEASE_STRATEGY=conventional
+	cat >"$BATS_TEST_TMPDIR/stubs/curl" <<-'EOF'
+		#!/bin/sh
+		url="" data="" auth=""
+		while [ $# -gt 0 ]; do
+			case $1 in
+			--data) [ "$2" = @- ] && data=$(cat); shift ;;
+			-H) case $2 in Authorization:*) auth=$2 ;; esac; shift ;;
+			-X | --retry | --max-time) shift ;;
+			http*) url=$1 ;;
+			esac
+			shift
+		done
+		printf '%s %s %s\n' "$url" "$auth" "$data" >>"$STUB_LOG"
+		if [ -n "${STUB_FAIL:-}" ]; then echo '{"message":"401 Unauthorized"}'; exit 22; fi
+		printf '%s\n' "$STUB_GRAPHQL"
+	EOF
+}
+
+# ciMinutesUsage's answer: MINUTES used in the month starting on DATE, and
+# an older month that must not count.
+minutes_used() {
+	printf '{"data":{"ciMinutesUsage":{"nodes":[{"monthIso8601":"%s","minutes":%s},{"monthIso8601":"2020-01-01","minutes":999}]}}}' "$1" "$2"
+}
+
+@test "budget: GitLab waits 28 days when the projected CI minutes exceed the budget" {
+	gitlab_minutes
+	export CI_MINUTES_TOKEN=minutes-secret AUTO_RELEASE_TODAY=2026-11-10
+	export STUB_GRAPHQL="$(minutes_used 2026-11-01 150)"
+	old_tag v1.2.3 8
+	touch_commit "chore(deps): update requests from 2.32.0 to 2.33.0" uv.lock
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+	# 150 minutes by day 10 of 30: 450 at the month's end, 112% of 400.
+	[[ "$stderr" == *"CI minutes: 150 of 400 by day 10 of 30, projected 450 at the month's end (112%), budget 85%"* ]]
+	[[ "$stderr" == *"CI minutes over budget, so it waits 28 days; v1.2.3 is 8 days old"* ]]
+	grep -q '^https://gitlab.example.com/api/graphql Authorization: Bearer minutes-secret .*ciMinutesUsage(date: \\"2026-11-01\\")' "$STUB_LOG"
+}
+
+@test "budget: GitLab keeps 7 days under the budget" {
+	gitlab_minutes
+	export CI_MINUTES_TOKEN=minutes-secret AUTO_RELEASE_TODAY=2026-11-10
+	export STUB_GRAPHQL="$(minutes_used 2026-11-01 100)"
+	old_tag v1.2.3 8
+	touch_commit "chore(deps): update requests from 2.32.0 to 2.33.0" uv.lock
+	next_tag
+	[ "$next" = v1.2.4 ]
+	[[ "$stderr" == *"projected 300 at the month's end (75%)"* ]]
+}
+
+@test "budget: the projection counts the days of the month, leap years included" {
+	gitlab_minutes
+	export CI_MINUTES_TOKEN=minutes-secret
+	old_tag v1.2.3 8
+	touch_commit "chore(deps): update requests from 2.32.0 to 2.33.0" uv.lock
+	# 170 by day 14 of 28: 340, exactly 85%, not over.
+	AUTO_RELEASE_TODAY=2027-02-14 STUB_GRAPHQL="$(minutes_used 2027-02-01 170)" next_tag
+	[ "$next" = v1.2.4 ]
+	[[ "$stderr" == *"by day 14 of 28, projected 340 at the month's end (85%)"* ]]
+	# 2028 is a leap year: 170 * 29 / 14 = 352, 88%.
+	AUTO_RELEASE_TODAY=2028-02-14 STUB_GRAPHQL="$(minutes_used 2028-02-01 170)" next_tag
+	[ "$next" = none ]
+	[[ "$stderr" == *"by day 14 of 29, projected 352 at the month's end (88%)"* ]]
+	# 1900 was not, 2000 was.
+	AUTO_RELEASE_TODAY=1900-02-07 STUB_GRAPHQL="$(minutes_used 1900-02-01 10)" next_tag
+	[[ "$stderr" == *"by day 7 of 28,"* ]]
+	AUTO_RELEASE_TODAY=2000-02-07 STUB_GRAPHQL="$(minutes_used 2000-02-01 10)" next_tag
+	[[ "$stderr" == *"by day 7 of 29,"* ]]
+	# A month with no usage yet has no node: 0 minutes.
+	AUTO_RELEASE_TODAY=2026-12-01 STUB_GRAPHQL="$(minutes_used 2026-11-01 400)" next_tag
+	[ "$next" = v1.2.4 ]
+	[[ "$stderr" == *"CI minutes: 0 of 400 by day 1 of 31"* ]]
+	# The quota and the budget are settings.
+	AUTO_RELEASE_MINUTES_QUOTA=1000 AUTO_RELEASE_MINUTES_BUDGET_PCT=50 \
+		AUTO_RELEASE_TODAY=2026-11-15 STUB_GRAPHQL="$(minutes_used 2026-11-01 300)" next_tag
+	[ "$next" = none ]
+	[[ "$stderr" == *"300 of 1000 by day 15 of 30, projected 600 at the month's end (60%), budget 50%"* ]]
+}
+
+@test "budget: a release 28 days old goes out without asking" {
+	gitlab_minutes
+	export CI_MINUTES_TOKEN=minutes-secret AUTO_RELEASE_TODAY=2026-11-10
+	export STUB_GRAPHQL="$(minutes_used 2026-11-01 400)"
+	old_tag v1.2.3 28
+	touch_commit "chore(deps): update requests from 2.32.0 to 2.33.0" uv.lock
+	next_tag
+	[ "$next" = v1.2.4 ]
+	! grep -q graphql "$STUB_LOG"
+	AUTO_RELEASE_MAINTENANCE_DAYS_OVER_BUDGET=30 next_tag
+	[ "$next" = none ]
+}
+
+@test "budget: without CI_MINUTES_TOKEN GitLab keeps 7 days and says so" {
+	gitlab_minutes
+	old_tag v1.2.3 8
+	touch_commit "chore(deps): update requests from 2.32.0 to 2.33.0" uv.lock
+	next_tag
+	[ "$next" = v1.2.4 ]
+	[[ "$stderr" == *"no CI_MINUTES_TOKEN (a read_api token), so the usage is unknown; keeping 7 days"* ]]
+	[ ! -s "$STUB_LOG" ]
+}
+
+@test "budget: a failed query keeps 7 days and says why" {
+	gitlab_minutes
+	export CI_MINUTES_TOKEN=minutes-secret
+	old_tag v1.2.3 8
+	touch_commit "chore(deps): update requests from 2.32.0 to 2.33.0" uv.lock
+	STUB_FAIL=1 next_tag
+	[ "$next" = v1.2.4 ]
+	[[ "$stderr" == *"the usage query failed, keeping 7 days"*"401 Unauthorized"* ]]
+	[[ "$stderr" != *"minutes-secret"* ]]
+	STUB_GRAPHQL='{"errors":[{"message":"Field ciMinutesUsage needs read_api"}]}' next_tag
+	[ "$next" = v1.2.4 ]
+	[[ "$stderr" == *"the usage query failed, keeping 7 days"*"needs read_api"* ]]
+	STUB_GRAPHQL='{"data":{"ciMinutesUsage":null}}' next_tag
+	[ "$next" = v1.2.4 ]
+	[[ "$stderr" == *"the usage query failed"* ]]
+}
+
+@test "budget: 0 turns the check off, and other forges never ask" {
+	gitlab_minutes
+	export CI_MINUTES_TOKEN=minutes-secret STUB_GRAPHQL="$(minutes_used 2026-11-01 400)"
+	old_tag v1.2.3 8
+	touch_commit "chore(deps): update requests from 2.32.0 to 2.33.0" uv.lock
+	AUTO_RELEASE_MINUTES_BUDGET_PCT=0 next_tag
+	[ "$next" = v1.2.4 ]
+	[[ "$stderr" == *"CI minutes check: off"* ]]
+	unset GITLAB_CI
+	GITHUB_ACTIONS=true GITHUB_REPOSITORY=example/app next_tag
+	[ "$next" = v1.2.4 ]
+	[ ! -s "$STUB_LOG" ]
+	AUTO_RELEASE_MINUTES_BUDGET_PCT=most run "$AUTO_RELEASE" plan
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"AUTO_RELEASE_MINUTES_BUDGET_PCT must be a whole number"* ]]
 }

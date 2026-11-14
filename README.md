@@ -49,6 +49,12 @@ Dependency updates are `chore(deps)` commits, which release nothing under `conve
 - Unreleased commits changed a runtime input: a file matching `AUTO_RELEASE_RUNTIME_PATHS`, by default `Dockerfile*`, `uv.lock`, `requirements*.txt`, `pyproject.toml`, `package.json`, `package-lock.json`, `go.mod`, `go.sum` and `composer.*`. A pattern without a `/` matches the file name in any directory (`Dockerfile*` covers `tools/Dockerfile`), one with a `/` the path from the repository root. The net change since the tag counts, so an update reverted before the run changes nothing. CI, documentation and development-tool changes (`.github/`, `.gitlab-ci.yml`, `.pre-commit-config.yaml`) never release.
 - The last release tag is at least `AUTO_RELEASE_MAINTENANCE_DAYS` days old (default 7, `0` turns maintenance releases off). With weekly dependency updates that is at most one maintenance release a week, and a repository whose runtime inputs did not change never rebuilds.
 
+### On GitLab's CI minutes
+
+Every release on GitLab runs a release build on the namespace's CI minutes (400 a month on the Free tier). When the month's use runs high, maintenance releases slow down from weekly to every four weeks. Before a maintenance release whose last tag is between `AUTO_RELEASE_MAINTENANCE_DAYS` and `AUTO_RELEASE_MAINTENANCE_DAYS_OVER_BUDGET` (default 28) days old, a GitLab run reads the namespace's `ciMinutesUsage` (GraphQL) for the current month. It projects the minutes used so far linearly to the end of the month (used × days in the month ÷ day of the month). When that projection is more than `AUTO_RELEASE_MINUTES_BUDGET_PCT` (default 85) percent of `AUTO_RELEASE_MINUTES_QUOTA` (default 400), the release waits until the tag is 28 days old.
+
+The query needs `CI_MINUTES_TOKEN`, a masked CI/CD variable holding a personal access token with the `read_api` scope. GitLab's API cannot create one with that scope, so create it in the UI (Preferences → Access tokens). It reads the usage of the token owner's personal namespace. Without the token, or when the query fails, the run logs why and keeps the shorter period. `AUTO_RELEASE_MINUTES_BUDGET_PCT=0` turns the check off. GitHub and Forgejo runs never query anything, and security releases never wait.
+
 The notes list the runtime inputs that changed, then the commits as usual, with the dependency updates under Dependencies. Security fixes do not wait for this: the `security` strategy still releases a `fix(security)` commit, a base image fix or a fresh rebuild at once.
 
 ## Fresh rebuilds
@@ -110,12 +116,13 @@ Include the [`ci-templates`](https://gitlab.com/mbologna/ci-templates) component
 
 ```yaml
 include:
-  - component: gitlab.com/mbologna/ci-templates/auto-release@3.0.0
+  - component: gitlab.com/mbologna/ci-templates/auto-release@7.0.0
     inputs:
-      strategy: commits       # or conventional, docker
+      strategy: conventional  # or commits
+      # maintenance_days: 7, runtime_paths: "...", minutes_budget_pct: 85
 ```
 
-The job runs only in scheduled pipelines on the default branch: add a pipeline schedule on `main` with cron `0 6 * * 1` (UTC), and use its "Run now" to release at once. The `docker` strategy reads `$CI_REGISTRY_IMAGE` with the job token.
+The release runs in scheduled pipelines on the default branch: add a pipeline schedule on `main` with cron `0 6 * * 1` (UTC), and use its "Run now" to release at once. A push to the default branch runs `security`. For the [CI minutes check](#on-gitlabs-ci-minutes), add a masked `CI_MINUTES_TOKEN` variable.
 
 ### Forgejo (Codeberg)
 
@@ -151,6 +158,10 @@ jobs:
 | `AUTO_RELEASE_IMAGE` | image without a tag that the `docker` strategy compares and the fresh rebuild scans at the last version; GitLab defaults to `$CI_REGISTRY_IMAGE`. auto-release logs in to its registry with the forge's token |
 | `AUTO_RELEASE_REBUILD_DAYS` | days after the last release when a [fresh rebuild](#fresh-rebuilds) may release; default 7, `0` turns it off |
 | `AUTO_RELEASE_MAINTENANCE_DAYS` | days after the last release when a [maintenance release](#maintenance-releases) may release; default 7, `0` turns it off |
+| `AUTO_RELEASE_MAINTENANCE_DAYS_OVER_BUDGET` | GitLab: days a maintenance release waits instead when the projected CI minutes are over budget; default 28 |
+| `AUTO_RELEASE_MINUTES_BUDGET_PCT` | GitLab: the share of the monthly CI minutes, projected to the month's end, above which maintenance releases slow down; default 85, `0` turns the check off |
+| `AUTO_RELEASE_MINUTES_QUOTA` | GitLab: the namespace's monthly CI minutes; default 400 |
+| `CI_MINUTES_TOKEN` | GitLab: a `read_api` token that reads the CI minutes usage; without it the check is skipped |
 | `AUTO_RELEASE_RUNTIME_PATHS` | the runtime inputs whose changes a maintenance release ships: shell patterns separated by spaces or commas; default `Dockerfile* uv.lock requirements*.txt pyproject.toml package.json package-lock.json go.mod go.sum composer.*` |
 | `AUTO_RELEASE_BASE_IMAGE_PATTERN` | extended regular expression; matching `Dockerfile` lines go into the notes |
 | `AUTO_RELEASE_TOKEN` | token that pushes the tag and creates the Release; GitHub and Forgejo fall back to `GITHUB_TOKEN` |

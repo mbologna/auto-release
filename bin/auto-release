@@ -19,6 +19,14 @@
 #                                    changed and the last release is this many days old,
 #                                    even without a feat or fix commit (default 7; 0
 #                                    disables)
+#   AUTO_RELEASE_MINUTES_BUDGET_PCT  GitLab: when the namespace's CI minutes, projected to
+#                                    the month's end, exceed this share of the quota, the
+#                                    maintenance release waits the longer period below
+#                                    (default 85; 0 disables; needs CI_MINUTES_TOKEN)
+#   AUTO_RELEASE_MAINTENANCE_DAYS_OVER_BUDGET
+#                                    the longer period (default 28)
+#   AUTO_RELEASE_MINUTES_QUOTA       the namespace's monthly CI minutes (default 400)
+#   CI_MINUTES_TOKEN                 GitLab token with read_api that reads the usage
 #   AUTO_RELEASE_RUNTIME_PATHS       the runtime inputs: shell patterns separated by spaces
 #                                    or commas; one without a / matches a file name in any
 #                                    directory (default Dockerfile* uv.lock
@@ -352,6 +360,79 @@ rebuild_days() { whole_days AUTO_RELEASE_REBUILD_DAYS 7; }
 # AUTO_RELEASE_MAINTENANCE_DAYS as a plain number; 7 when unset or empty.
 maintenance_days() { whole_days AUTO_RELEASE_MAINTENANCE_DAYS 7; }
 
+# A whole number, or 0 when unset or empty: whole_number NAME DEFAULT.
+whole_number() {
+	eval "n=\${$1:-$2}"
+	case $n in "" | *[!0-9]*) die "$1 must be a whole number; got '$n'" ;; esac
+	n=$(printf '%s' "$n" | sed 's/^0*//')
+	printf '%s' "${n:-0}"
+}
+
+# Days in a month: days_in_month YEAR MONTH (no leading zeros).
+days_in_month() {
+	case $2 in
+	1 | 3 | 5 | 7 | 8 | 10 | 12) printf 31 ;;
+	4 | 6 | 9 | 11) printf 30 ;;
+	*)
+		if [ $(($1 % 4)) -eq 0 ] && { [ $(($1 % 100)) -ne 0 ] || [ $(($1 % 400)) -eq 0 ]; }; then
+			printf 29
+		else
+			printf 28
+		fi
+		;;
+	esac
+}
+
+# Month-end CI minutes as a percentage of the quota, projected linearly from
+# the minutes used by day DAY of a month of DAYS days:
+# projected_pct USED DAY DAYS QUOTA.
+projected_pct() {
+	printf '%s' $(($1 * $3 * 100 / ($2 * $4)))
+}
+
+# GitLab only: true when the namespace's CI minutes, projected to the end of
+# the month, exceed AUTO_RELEASE_MINUTES_BUDGET_PCT of
+# AUTO_RELEASE_MINUTES_QUOTA. Reads ciMinutesUsage (GraphQL) for the
+# namespace of CI_MINUTES_TOKEN's user. False, saying why, when the check is
+# off, the token is missing or the query fails: the shorter period applies.
+minutes_over_budget() {
+	budget=$(whole_number AUTO_RELEASE_MINUTES_BUDGET_PCT 85)
+	quota=$(whole_number AUTO_RELEASE_MINUTES_QUOTA 400)
+	if [ "$budget" -eq 0 ] || [ "$quota" -eq 0 ]; then
+		log "CI minutes check: off"
+		return 1
+	fi
+	if [ -z "${CI_MINUTES_TOKEN:-}" ]; then
+		log "CI minutes check: no CI_MINUTES_TOKEN (a read_api token), so the usage is unknown; keeping $days days"
+		return 1
+	fi
+	# AUTO_RELEASE_TODAY (YYYY-MM-DD) lets the tests pick the day.
+	today=${AUTO_RELEASE_TODAY:-$(date -u +%Y-%m-%d)}
+	case $today in [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]) ;; *) die "AUTO_RELEASE_TODAY must be YYYY-MM-DD; got '$today'" ;; esac
+	year=${today%%-*} month=${today#*-} day=${today##*-}
+	month=${month%-*}
+	month=${month#0} day=${day#0}
+	url=${CI_API_GRAPHQL_URL:-${CI_SERVER_URL:-https://gitlab.com}/api/graphql}
+	first=$(printf '%s-%02d-01' "$year" "$month")
+	query=$(jq -cn --arg d "$first" \
+		'{query: ("query { ciMinutesUsage(date: \"" + $d + "\") { nodes { monthIso8601 minutes } } }")}')
+	if ! json=$(printf '%s' "$query" | curl -sS --fail-with-body --retry 2 --max-time 30 -X POST \
+		-H "Authorization: Bearer ${CI_MINUTES_TOKEN}" -H 'Content-Type: application/json' \
+		--data @- "$url" 2>&1) ||
+		! used=$(printf '%s' "$json" | jq -er --arg d "$first" \
+			'if .errors then error(.errors[0].message) else .data.ciMinutesUsage.nodes |
+			(map(select(.monthIso8601 == $d)) | first | .minutes) // 0 end' 2>&1); then
+		log "CI minutes check: the usage query failed, keeping $days days: $(printf '%s' "${used:-$json}" | head -c 300)"
+		return 1
+	fi
+	used=${used%%.*}
+	case $used in "" | *[!0-9]*) used=0 ;; esac
+	ndays=$(days_in_month "$year" "$month")
+	pct=$(projected_pct "$used" "$day" "$ndays" "$quota")
+	log "CI minutes: $used of $quota by day $day of $ndays, projected $((used * ndays / day)) at the month's end ($pct%), budget $budget%"
+	[ "$pct" -gt "$budget" ]
+}
+
 DEFAULT_RUNTIME_PATHS='Dockerfile* uv.lock requirements*.txt pyproject.toml package.json package-lock.json go.mod go.sum composer.*'
 
 # The files changed between a tag and HEAD that are runtime inputs, one per
@@ -397,6 +478,13 @@ maintenance_due() {
 	age=$(($(date +%s) - $(tag_time "$1")))
 	if [ "$age" -lt $((days * 86400)) ]; then
 		log "Maintenance release: runtime inputs changed, but $1 is $((age / 86400)) days old, under $days days"
+		return 1
+	fi
+	# On GitLab every release build costs CI minutes: past the budget, wait
+	# the longer period. The query runs only when its answer matters.
+	slow=$(whole_days AUTO_RELEASE_MAINTENANCE_DAYS_OVER_BUDGET 28)
+	if [ "$FORGE" = gitlab ] && [ "$age" -lt $((slow * 86400)) ] && minutes_over_budget; then
+		log "Maintenance release: CI minutes over budget, so it waits $slow days; $1 is $((age / 86400)) days old"
 		return 1
 	fi
 	log "Maintenance release: $1 is $((age / 86400)) days old and runtime inputs changed"
@@ -518,6 +606,9 @@ plan() {
 	NEEDED=false NEXT_TAG="" DIGEST_NOTE="" SECURITY_NOTE="" REBUILD_NOTE="" MAINTENANCE_NOTE=""
 	rebuild_days >/dev/null
 	maintenance_days >/dev/null
+	whole_days AUTO_RELEASE_MAINTENANCE_DAYS_OVER_BUDGET 28 >/dev/null
+	whole_number AUTO_RELEASE_MINUTES_BUDGET_PCT 85 >/dev/null
+	whole_number AUTO_RELEASE_MINUTES_QUOTA 400 >/dev/null
 	LATEST_TAG=$(latest_tag)
 	if [ -z "$LATEST_TAG" ]; then
 		log "No vX.Y.Z tag found: push an initial tag by hand to bootstrap. Skipping."
