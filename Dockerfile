@@ -24,3 +24,6 @@ COPY tests/ /src/tests/
 RUN AUTO_RELEASE_BIN=/usr/local/bin/auto-release bats /src/tests
 
 FROM runtime
+# Alpine's security fixes published since the base image was built; the
+# fresh rebuild check counts the base image's findings because of this line.
+RUN apk upgrade --no-cache
