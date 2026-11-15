@@ -678,6 +678,40 @@ next_tag() {
 	[[ "$stderr" == *"Fresh rebuild check: none in the packages Dockerfile installs"* ]]
 }
 
+@test "rebuild: a final stage that upgrades its packages counts the base image's findings" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_1_2_3="CVE-2026-2 zlib" STUB_VULNS_3_24_3="CVE-2026-2 zlib"
+	dockerfile 'FROM alpine:3.24.3' 'RUN apk upgrade --no-cache'
+	commit "feat: add a Dockerfile"
+	old_tag v1.2.3
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$output" == "## v1.2.4"* ]]
+	[[ "$output" == *'- CVE-2026-2 in `zlib`'* ]]
+	[[ "$stderr" == *"Dockerfile upgrades its OS packages"* ]]
+	! grep -qx alpine:3.24.3 "$TRIVY_LOG"
+}
+
+@test "rebuild: apt-get upgrade is recognised, in a continued RUN line" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_1_2_3="CVE-2026-2 zlib1g" STUB_VULNS_3_14_slim="CVE-2026-2 zlib1g"
+	dockerfile 'FROM python:3.14-slim' 'RUN apt-get update \' '    && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \' '    && rm -rf /var/lib/apt/lists/*'
+	commit "feat: add a Dockerfile"
+	old_tag v1.2.3
+	next_tag
+	[ "$next" = v1.2.4 ]
+}
+
+@test "rebuild: an upgrade in an earlier stage or a comment does not count" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_1_2_3="CVE-2026-2 zlib" STUB_VULNS_3_24_3="CVE-2026-2 zlib"
+	dockerfile 'FROM alpine:3.24.3 AS build' 'RUN apk upgrade' 'FROM alpine:3.24.3' '# no apk upgrade here' 'RUN apk add --no-cache curl' 'RUN apt-get install --only-upgrade zlib1g'
+	commit "feat: add a Dockerfile"
+	old_tag v1.2.3
+	next_tag
+	[ "$next" = none ]
+}
+
 @test "rebuild: language packages do not count, a rebuild keeps their versions" {
 	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
 	export STUB_VULNS_1_2_3="CVE-2026-7 requests lang-pkgs" STUB_VULNS_3_14_slim=""
