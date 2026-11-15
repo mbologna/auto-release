@@ -522,7 +522,9 @@ release_dockerfile() {
 # ships the fix, while nothing in the repository changes to trigger one. A
 # finding counts when it is in an OS package of ${AUTO_RELEASE_IMAGE}:<last
 # version> and not in the final-stage base image at the last tag, whose own
-# fixes need a base image update instead. Language packages are left out:
+# fixes need a base image update instead, unless the final stage upgrades its
+# OS packages (apt-get upgrade, apk upgrade): then a rebuild fixes those too,
+# without waiting for the base image's maintainers. Language packages are left out:
 # lock files and pinned versions keep them as they are, so a rebuild would
 # not fix them. Only when the last tag is AUTO_RELEASE_REBUILD_DAYS old, so a
 # fix that is not out yet costs one release per period, not one per run.
@@ -552,7 +554,9 @@ rebuild_fixes_cves() {
 		return 1
 	fi
 	from_base=""
-	if [ -n "$base" ] && ! from_base=$(image_vulns "$base" os); then
+	if git show "$1:./$df" | final_stage_upgrades; then
+		log "Fresh rebuild check: $df upgrades its OS packages, so the base image's findings count too"
+	elif [ -n "$base" ] && ! from_base=$(image_vulns "$base" os); then
 		log "warning: cannot scan $base; skipping the fresh rebuild check"
 		return 1
 	fi
@@ -564,6 +568,18 @@ rebuild_fixes_cves() {
 	fi
 	log "Fresh rebuild check: $1 is $((age / 86400)) days old and a rebuild should fix $(printf '%s\n' "$added" | grep -c .) findings"
 	REBUILD_NOTE=$(printf '%s\n' "$added" | awk '{printf "- %s in `%s`\n", $1, $2}')
+}
+
+# Reads a Dockerfile on stdin; succeeds when its final stage upgrades the OS
+# packages (apt-get or apt upgrade or dist-upgrade, apk upgrade), so a fresh
+# build also picks up the fixes the base image doesn't have yet. Comments and
+# earlier stages don't count.
+final_stage_upgrades() {
+	awk '
+	/^[ \t]*#/ { next }
+	toupper($1) == "FROM" { stage = ""; next }
+	{ stage = stage " " $0 }
+	END { exit !(stage ~ /(apt-get|apt)[ \t]+([^ \t&;|]+[ \t]+)*(dist-)?upgrade|apk[ \t]+([^ \t&;|]+[ \t]+)*upgrade/) }'
 }
 
 tmpfile() {
