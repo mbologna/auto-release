@@ -76,7 +76,7 @@ Every repository releases on the same rhythm: Monday at 06:00 UTC with `conventi
 
 ### Branches
 
-`main` is always releasable: work happens on short-lived branches and reaches `main` through a pull or merge request, squash-merged. The squash commit's subject is the PR title, and auto-release reads that subject for the release-note line and the version bump, so a check (`mbologna/.github`'s `pr-title.yml` on GitHub, ci-templates' `conventional-title` on GitLab) requires PR titles to be Conventional Commits.
+`main` is always releasable: work happens on short-lived branches and reaches `main` through a pull or merge request. auto-release reads the subjects of the commits that land for the release-note lines and the version bump, so they must be Conventional Commits. On GitHub pull requests are rebase-merged and `mbologna/.github`'s `commits.yml` lints every commit; on GitLab merge requests are squash-merged with the title as the subject, and ci-templates' `conventional-title` checks the title.
 
 ### GitHub
 
