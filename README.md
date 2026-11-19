@@ -1,13 +1,15 @@
 # auto-release
 
 `auto-release` tags the next semantic version of a repository and publishes a Release with
-notes grouped by change type, on GitHub, GitLab and Forgejo. The release decision lives in
-one shell script and one container image, outside any forge's release tooling, so the
-three forges follow the same rules. It derives the version from
+notes grouped by change type, on GitHub, GitLab and [Forgejo](https://forgejo.org/). The
+release decision lives in one shell script and one container image, outside any forge's
+release tooling, so the three forges follow the same rules. It derives the version from
 [Conventional Commits](https://www.conventionalcommits.org/) and writes the notes with
-[git-cliff](https://git-cliff.org/), as release-please does, but releases on a schedule
-without a release pull request. The notes live only in the forge's Release: nothing is
-committed back to the default branch, so the job needs no branch-protection bypass.
+[git-cliff](https://git-cliff.org/), as
+[release-please](https://github.com/googleapis/release-please) does, but releases on a
+schedule without a release pull request. The notes live only in the forge's Release:
+nothing is committed back to the default branch, so the job needs no branch-protection
+bypass.
 
 ## How a run decides
 
@@ -21,20 +23,24 @@ then decides whether a release is due:
 | `conventional` | a `feat`, `fix`, `perf`, `revert` or breaking commit landed, a maintenance release is due, or a fresh rebuild is due |
 | `security` | a `fix(security)` commit landed, a base image update fixes CVEs, or a fresh rebuild is due |
 
-A breaking change bumps the major, even before 1.0.0, a `feat` the minor and anything else
-the patch. `auto-release release` pushes an annotated tag, creates the Release and, on
-GitHub and Forgejo, starts the tag build. `auto-release plan` prints the version and notes
-and changes nothing.
+Any other strategy name fails the run, even before the first tag. A breaking change bumps
+the major, even before 1.0.0, a `feat` the minor and anything else the patch.
+`auto-release release` pushes an annotated tag, creates the Release and, on GitHub and
+Forgejo, starts the tag build. `auto-release plan` prints the version and notes and changes
+nothing.
 
-[docs/decisions.md](docs/decisions.md) covers each strategy, the security check, fresh
-rebuilds, maintenance releases and failures; [docs/release-notes.md](docs/release-notes.md)
-the notes; [docs/ci-minutes.md](docs/ci-minutes.md) the GitLab CI minutes budget.
+The base image and fresh rebuild checks scan images with
+[Trivy](https://trivy.dev/). [docs/decisions.md](docs/decisions.md) covers each strategy,
+the security check, fresh rebuilds, maintenance releases and failures;
+[docs/release-notes.md](docs/release-notes.md) the notes;
+[docs/ci-minutes.md](docs/ci-minutes.md) the GitLab CI minutes budget.
 
 ## Use it
 
-Every repository releases on Monday at 06:00 UTC with `conventional`, plus a
-manual run on the default branch for a release that cannot wait. Each push to the default
-branch runs `security`, so a CVE fix is released at once; any other push waits for Monday.
+The GitHub workflow and the GitLab component below are built for one rhythm: a scheduled
+run on Monday at 06:00 UTC with `conventional`, a manual run for a release that cannot
+wait, and `security` on pushes to the default branch, so a CVE fix is released at once and
+any other change waits for Monday.
 
 `main` is always releasable: work reaches it from short-lived branches through a pull or
 merge request. auto-release reads the subjects of the commits that land for the notes and
@@ -46,9 +52,12 @@ skips the `Merge …` commit itself. Every commit is linted with
 
 ### GitHub
 
-Call the reusable workflow in
-[`mbologna/.github`](https://github.com/mbologna/.github/blob/main/.github/workflows/auto-release.yml)
-from the repository's CI workflow:
+The reusable workflow
+[`auto-release.yml`](https://github.com/mbologna/.github/blob/main/.github/workflows/auto-release.yml)
+in `mbologna/.github` runs the image as a [GitHub Actions](https://docs.github.com/actions)
+job container. A repository that builds its image with `mbologna/.github`'s
+`docker-ci.yml` sets its `release_strategy` input, which calls `auto-release.yml` after
+the build; others call `auto-release.yml` directly:
 
 ```yaml
 "on":
@@ -59,40 +68,50 @@ from the repository's CI workflow:
 
 jobs:
   auto-release:
-    if: >-                    # Monday, a manual run, or a push (security only)
-      github.event_name == 'schedule' ||
-      ((github.event_name == 'workflow_dispatch' || github.event_name == 'push') &&
-      github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
-    needs: [docker]
+    needs: [build]
     permissions:
       contents: write         # push the tag, create the Release
       actions: write          # start this workflow on the new tag
     uses: mbologna/.github/.github/workflows/auto-release.yml@<sha> # main
     with:
-      strategy: conventional  # or commits; a push always runs security
+      strategy: conventional  # or commits
       # optional: dockerfiles, image, base_image_pattern, dispatch_tag_build: false,
       # dispatch_workflow: publish.yml, dry_run: true
 ```
 
+The workflow gates itself, so the caller needs no `if:`: it runs on the schedule, and on a
+push or a manual run on the default branch, and skips pull requests, other branches and the
+tag build. The schedule uses `strategy`, a push `security` and a manual run `commits`,
+which releases whatever is unreleased. A caller still passing the removed `docker` strategy
+gets `conventional` and a warning.
+
 ### GitLab
 
-Include the [`ci-templates`](https://gitlab.com/mbologna/ci-templates) component and set a
-masked `AUTO_RELEASE_TOKEN` CI/CD variable:
+Include the `auto-release` component of
+[`ci-templates`](https://gitlab.com/mbologna/ci-templates), a
+[GitLab CI/CD component](https://docs.gitlab.com/ci/components/), and set a masked
+`AUTO_RELEASE_TOKEN` CI/CD variable:
 
 ```yaml
 include:
-  - component: gitlab.com/mbologna/ci-templates/auto-release@7.3.0
+  - component: gitlab.com/mbologna/ci-templates/auto-release@8.1.0
     inputs:
       strategy: conventional  # or commits
-      # dockerfiles: "...", maintenance_days: 7, runtime_paths: "...", minutes_budget_pct: 85
+      # dockerfiles: "...", maintenance_days: 7, runtime_paths: "...", minutes_budget_pct: 85,
+      # security_paths: [...], image: "...", base_image_pattern: "...", dry_run: true
 ```
 
 Add a pipeline schedule on `main` with cron `0 6 * * 1` (UTC); its "Run now" releases at
-once. A push to the default branch runs `security`.
+once with the same strategy. A push to the default branch runs `security` only when its
+commit message contains `fix(security)` or it changes a file matching `security_paths`
+(Dockerfiles and dependency manifests by default); any other push creates no auto-release
+job.
 
 ### Forgejo (Codeberg)
 
-Run the image as the job container:
+Run the image as the job container of a
+[Forgejo Actions](https://forgejo.org/docs/latest/user/actions/) workflow, for example on
+[Codeberg](https://codeberg.org/):
 
 ```yaml
 jobs:
@@ -163,8 +182,14 @@ Every variable the script reads; "detected" and "set by CI" values come from the
 
 ## Development
 
-`tests/auto-release.bats` builds throwaway repositories for each rule, stubs `curl`, `crane`
-and `trivy`, and pushes tags to a local bare repository. Run `bats tests/` (needs git,
-git-cliff and jq) or `docker build --target test .` for the same tests inside the image.
-The image `ghcr.io/mbologna/auto-release` is built from the [`Dockerfile`](Dockerfile);
-auto-release releases itself with `conventional`, and only release tags publish the image.
+`tests/auto-release.bats` builds throwaway repositories for each rule, stubs `curl`,
+[`crane`](https://github.com/google/go-containerregistry/tree/main/cmd/crane) and `trivy`,
+and pushes tags to a local bare repository. Run `bats tests/` (needs
+[Bats](https://bats-core.readthedocs.io/), git, git-cliff and [jq](https://jqlang.org/)) or
+`docker build --target test .` for the same tests inside the image. CI also runs
+[ShellCheck](https://www.shellcheck.net/) on `bin/auto-release`.
+
+The image `ghcr.io/mbologna/auto-release` is built from the [`Dockerfile`](Dockerfile), on
+[Alpine Linux](https://alpinelinux.org/) with crane, curl, git, git-cliff, jq and Trivy.
+auto-release releases itself with `conventional` through `docker-ci.yml`'s
+`release_strategy`, and only release tags publish the image.
