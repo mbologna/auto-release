@@ -39,12 +39,8 @@ setup() {
 	EOF
 	cat >stubs/crane <<-'EOF'
 		#!/bin/sh
-		# crane digest IMAGE:TAG -> the value of STUB_DIGEST_<TAG>, else not found.
-		[ "$1" = digest ] || exit 0
-		tag=$(printf '%s' "${2##*:}" | tr . _)
-		eval "d=\${STUB_DIGEST_$tag:-}"
-		[ -n "$d" ] || { echo "MANIFEST_UNKNOWN" >&2; exit 1; }
-		echo "$d"
+		# crane auth login: succeeds without logging in anywhere.
+		exit 0
 	EOF
 	cat >stubs/trivy <<-'EOF'
 		#!/bin/sh
@@ -226,31 +222,13 @@ next_tag() {
 	[ "$next" = v2.0.0 ]
 }
 
-@test "docker: a new digest releases a patch, even after a feat" {
-	export AUTO_RELEASE_STRATEGY=docker AUTO_RELEASE_IMAGE=docker.io/example/app
-	export STUB_DIGEST_1_2_3=sha256:old STUB_DIGEST_latest=sha256:new
-	git tag v1.2.3
-	commit "feat: a"
-	next_tag
-	[ "$next" = v1.2.4 ]
-	[[ "$output" == *'Image digest changed: `sha256:new`'* ]]
-}
-
-@test "docker: an unpublished version tag releases" {
-	export AUTO_RELEASE_STRATEGY=docker AUTO_RELEASE_IMAGE=docker.io/example/app
-	export STUB_DIGEST_latest=sha256:new
-	git tag v1.2.3
-	next_tag
-	[ "$next" = v1.2.4 ]
-}
-
-@test "docker: the same digest does not release" {
-	export AUTO_RELEASE_STRATEGY=docker AUTO_RELEASE_IMAGE=docker.io/example/app
-	export STUB_DIGEST_1_2_3=sha256:same STUB_DIGEST_latest=sha256:same
-	git tag v1.2.3
-	commit "fix: a"
-	next_tag
-	[ "$next" = none ]
+@test "an unknown strategy fails, the removed docker one included, even before the first tag" {
+	for strategy in docker semver; do
+		export AUTO_RELEASE_STRATEGY=$strategy
+		run "$AUTO_RELEASE" plan
+		[ "$status" -ne 0 ]
+		[[ "$output" == *"unknown strategy '$strategy' (commits, conventional or security)"* ]]
+	done
 }
 
 @test "notes: grouped by type, breaking changes first, merges and releases skipped" {
@@ -454,8 +432,8 @@ next_tag() {
 @test "a release run on a tag ref does nothing, so a dispatched tag build cannot loop" {
 	export GITHUB_ACTIONS=true GITHUB_REPOSITORY=example/app GITHUB_TOKEN=secret
 	export GITHUB_REF=refs/tags/v1.2.3 AUTO_RELEASE_PUSH_URL="$BATS_TEST_TMPDIR/remote.git"
-	export AUTO_RELEASE_STRATEGY=docker AUTO_RELEASE_IMAGE=docker.io/example/app STUB_DIGEST_latest=sha256:new
 	git tag v1.2.3
+	commit "fix: a"
 	run "$AUTO_RELEASE" release
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"Running on tag v1.2.3"* ]]

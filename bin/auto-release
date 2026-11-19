@@ -7,8 +7,8 @@
 #   auto-release release    plan, then push the tag and create the Release
 #
 # Configuration comes from the environment (CI jobs set it from their inputs):
-#   AUTO_RELEASE_STRATEGY            commits (default) | conventional | docker | security
-#   AUTO_RELEASE_IMAGE               docker: image to compare (GitLab: $CI_REGISTRY_IMAGE)
+#   AUTO_RELEASE_STRATEGY            commits (default) | conventional | security
+#   AUTO_RELEASE_IMAGE               image the fresh rebuild scans (GitLab: $CI_REGISTRY_IMAGE)
 #   AUTO_RELEASE_DOCKERFILES         security: Dockerfiles whose base image to compare,
 #                                    separated by spaces or commas (default Dockerfile)
 #   AUTO_RELEASE_REBUILD_DAYS        commits, conventional, security: release a fresh
@@ -588,10 +588,6 @@ tmpfile() {
 	printf '%s' "$f"
 }
 
-image_digest() {
-	crane digest "$1" 2>/dev/null || true
-}
-
 registry_login() {
 	[ -n "${REGISTRY_LOGIN:-}" ] || return 0
 	registry=${REGISTRY_LOGIN% *} user=${REGISTRY_LOGIN#* }
@@ -619,7 +615,7 @@ cliff() {
 
 # Sets NEEDED, NEXT_TAG, NOTES_FILE.
 plan() {
-	NEEDED=false NEXT_TAG="" DIGEST_NOTE="" SECURITY_NOTE="" REBUILD_NOTE="" MAINTENANCE_NOTE=""
+	NEEDED=false NEXT_TAG="" SECURITY_NOTE="" REBUILD_NOTE="" MAINTENANCE_NOTE=""
 	rebuild_days >/dev/null
 	maintenance_days >/dev/null
 	whole_days AUTO_RELEASE_MAINTENANCE_DAYS_OVER_BUDGET 28 >/dev/null
@@ -657,20 +653,6 @@ plan() {
 			NEEDED=true
 		fi
 		;;
-	docker)
-		[ -n "${AUTO_RELEASE_IMAGE:-}" ] || die "the docker strategy needs AUTO_RELEASE_IMAGE"
-		registry_login
-		tagged=$(image_digest "${AUTO_RELEASE_IMAGE}:${version}")
-		latest=$(image_digest "${AUTO_RELEASE_IMAGE}:latest")
-		log "Tagged (${version}) digest : ${tagged:-not found}"
-		log "Latest              digest : ${latest:-not found}"
-		# A missing version tag means the build that should have published it
-		# failed, so latest already holds newer content.
-		if [ -n "$latest" ] && [ "$tagged" != "$latest" ]; then
-			NEEDED=true
-			DIGEST_NOTE="Image digest changed: \`${latest}\`"
-		fi
-		;;
 	security)
 		# Runs on every push, outside the weekly rhythm: release at once only
 		# for a CVE fix, either a Renovate fix(security) update, a base image
@@ -687,7 +669,7 @@ plan() {
 		fi
 		[ "$NEEDED" = true ] || log "No security fix since $LATEST_TAG."
 		;;
-	*) die "unknown strategy '$STRATEGY' (commits, conventional, docker or security)" ;;
+	*) die "unknown strategy '$STRATEGY' (commits, conventional or security)" ;;
 	esac
 
 	if [ "$NEEDED" != true ]; then
@@ -695,12 +677,11 @@ plan() {
 		return 0
 	fi
 
-	# docker has no commit range to classify, so it always stays patch, and a
-	# maintenance release has no feat or breaking commit by definition. For the
-	# others git-cliff applies the Conventional Commit rules; when every commit
-	# is one the config skips (merges, chore(release)) it reports no bump, and
-	# a commit still landed, so release a patch.
-	if [ "$STRATEGY" = docker ] || [ "$count" -eq 0 ] || [ -n "$MAINTENANCE_NOTE" ]; then
+	# A maintenance release has no feat or breaking commit by definition. For
+	# the rest git-cliff applies the Conventional Commit rules; when every
+	# commit is one the config skips (merges, chore(release)) it reports no
+	# bump, and a commit still landed, so release a patch.
+	if [ "$count" -eq 0 ] || [ -n "$MAINTENANCE_NOTE" ]; then
 		NEXT_TAG=$(bump "$version" patch)
 	else
 		NEXT_TAG=$(cliff --bumped-version)
@@ -726,9 +707,6 @@ plan() {
 		fi
 		if [ -n "$MAINTENANCE_NOTE" ]; then
 			printf '### Maintenance release\n\nRuntime inputs changed since %s:\n\n%s\n\n' "$LATEST_TAG" "$MAINTENANCE_NOTE"
-		fi
-		if [ -n "$DIGEST_NOTE" ]; then
-			printf '%s\n\n' "$DIGEST_NOTE"
 		fi
 		if [ -n "${AUTO_RELEASE_BASE_IMAGE_PATTERN:-}" ] && [ -f Dockerfile ]; then
 			base=$(grep -E "$AUTO_RELEASE_BASE_IMAGE_PATTERN" Dockerfile || true)
@@ -830,11 +808,13 @@ main() {
 	case $command in plan | release) ;; *) log "unknown command '$command'"; usage 2 ;; esac
 
 	STRATEGY=${AUTO_RELEASE_STRATEGY:-commits}
+	# Checked here as well as in plan, so a wrong name fails even where plan
+	# stops early (no tag yet, a tag ref).
+	case $STRATEGY in commits | conventional | security) ;; *) die "unknown strategy '$STRATEGY' (commits, conventional or security)" ;; esac
 	FORGE=$(detect_forge)
 	case $FORGE in github | gitlab | forgejo | none) ;; *) die "unknown forge '$FORGE'" ;; esac
-	# A release run on a tag ref is the tag build it dispatched itself. With
-	# the docker strategy its version image is not built yet, so it would tag
-	# again, and again: docker-salt got 995 tags on one commit that way.
+	# A release run on a tag ref is the tag build it dispatched itself, and
+	# releases are cut from branches: it must not tag again.
 	if [ "$command" = release ] && on_tag_ref; then
 		log "Running on tag ${ON_TAG}: releases are cut from branches. Skipping."
 		return 0
