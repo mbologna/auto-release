@@ -45,7 +45,6 @@ Some releases start with a section that does not come from the commits:
   a fresh build is expected to fix.
 - A maintenance release starts with "Maintenance release" and the runtime inputs that
   changed since the last tag. Its `chore(deps)` commits appear under Dependencies as usual.
-- The `docker` strategy adds the new image digest.
 - When `AUTO_RELEASE_BASE_IMAGE_PATTERN` is set, the matching lines of the root
   `Dockerfile` follow under "Base image", in every release.
 

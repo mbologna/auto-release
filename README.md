@@ -19,7 +19,6 @@ then decides whether a release is due:
 |---|---|
 | `commits` (default) | any commit landed since the tag, or a fresh rebuild is due |
 | `conventional` | a `feat`, `fix`, `perf`, `revert` or breaking commit landed, a maintenance release is due, or a fresh rebuild is due |
-| `docker` | the registry's `latest` digest differs from the image tagged with the last version |
 | `security` | a `fix(security)` commit landed, a base image update fixes CVEs, or a fresh rebuild is due |
 
 A breaking change bumps the major, even before 1.0.0, a `feat` the minor and anything else
@@ -124,14 +123,14 @@ Every variable the script reads; "detected" and "set by CI" values come from the
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AUTO_RELEASE_STRATEGY` | `commits` | `commits`, `conventional`, `docker` or `security` |
+| `AUTO_RELEASE_STRATEGY` | `commits` | `commits`, `conventional` or `security` |
 | `AUTO_RELEASE_FORGE` | detected | `github`, `gitlab`, `forgejo` or `none`; with `none` only `plan` runs |
 | `AUTO_RELEASE_TOKEN` | GitHub, Forgejo: `GITHUB_TOKEN` | pushes the tag and creates the Release; a due `release` fails without one |
 | `AUTO_RELEASE_DRY_RUN` | unset | `true`, `1` or `yes` makes `release` behave like `plan` |
 | `AUTO_RELEASE_DISPATCH` | `true` | any value other than `true`, `1` or `yes` skips starting the tag build (GitHub, Forgejo) |
 | `AUTO_RELEASE_DISPATCH_WORKFLOW` | file named in `GITHUB_WORKFLOW_REF` | workflow file to start on the new tag; with neither, the dispatch is skipped |
 | `AUTO_RELEASE_CONFIG` | `./cliff.toml`, else the bundled one | git-cliff config |
-| `AUTO_RELEASE_IMAGE` | GitLab: `$CI_REGISTRY_IMAGE` | image without a tag: `docker` compares it (required there), the fresh rebuild scans it, and the registry login is for its registry |
+| `AUTO_RELEASE_IMAGE` | GitLab: `$CI_REGISTRY_IMAGE` | image without a tag: the fresh rebuild scans it, and the registry login is for its registry |
 | `AUTO_RELEASE_DOCKERFILES` | `Dockerfile` | Dockerfiles whose final base image `security` compares, separated by spaces or commas; missing ones are skipped |
 | `AUTO_RELEASE_SEVERITY` | `HIGH,CRITICAL` | Trivy severities the base image and fresh rebuild checks count |
 | `AUTO_RELEASE_REBUILD_DAYS` | `7` | age of the last tag at which a fresh rebuild may release; `0` turns it off |

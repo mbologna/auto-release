@@ -22,10 +22,6 @@ falls back to the local ones when the fetch fails.
   [maintenance release](#maintenance-releases) when that is due. A
   [fresh rebuild](#fresh-rebuilds) also releases. `docs`, `chore`, `ci`, `test`, `refactor`
   and the rest alone do not release.
-- `docker` needs `AUTO_RELEASE_IMAGE`. It reads the digests of `<image>:<last version>`
-  (without the `v`) and `<image>:latest` with `crane` and releases when `latest` exists and
-  the two differ. A missing version image counts as different: the build that should have
-  published it failed, so `latest` already holds newer content.
 - `security` runs on every push to the default branch and releases only a CVE fix: a
   `fix(security)` commit, a [base image update](#base-image-updates) that fixes CVEs, or a
   [fresh rebuild](#fresh-rebuilds).
@@ -34,8 +30,8 @@ falls back to the local ones when the fetch fails.
 
 git-cliff computes the bump with the bundled rules: a breaking change (`type!:` or a
 `BREAKING CHANGE:` footer) bumps the major, even before 1.0.0, a `feat` the minor and
-anything else the patch. The run always bumps the patch for the `docker` strategy, for a
-maintenance release, and when no commit landed since the tag (a fresh rebuild). When every
+anything else the patch. The run always bumps the patch for a maintenance release, and
+when no commit landed since the tag (a fresh rebuild). When every
 commit is one git-cliff skips, such as merges or `chore(release)`, git-cliff proposes no
 bump and the run releases a patch.
 
@@ -77,7 +73,7 @@ Renovate move them. The GitHub wrapper and the GitLab component take the list as
 
 Before 0.3.0 this check compared the image of the last version with the registry's
 `latest`, which meant building and pushing `latest` on every push. `AUTO_RELEASE_IMAGE` now
-matters only for the `docker` strategy, the registry login and the fresh rebuild.
+matters only for the registry login and the fresh rebuild.
 
 ### Registry credentials
 
@@ -162,8 +158,8 @@ If creating the Release fails after the tag is pushed, the run still starts the 
 and then fails, so the missing Release shows up as a failed job.
 
 A `release` run on a tag ref (`GITHUB_REF` of `refs/tags/…`, or `CI_COMMIT_TAG`) does
-nothing. The tag build that auto-release dispatches may be the workflow that called it, and
-with the `docker` strategy that run would see the version image missing and tag again.
+nothing. The tag build that auto-release dispatches may be the workflow that called it,
+and releases are cut from branches, so that run must not tag again.
 
 On GitHub, the run writes `released` and `tag` to `GITHUB_OUTPUT` and the notes to the job
 summary.
