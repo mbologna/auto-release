@@ -76,7 +76,7 @@ Every repository releases on the same rhythm: Monday at 06:00 UTC with `conventi
 
 ### Branches
 
-`main` is always releasable: work happens on short-lived branches and reaches `main` through a pull or merge request. auto-release reads the subjects of the commits that land for the release-note lines and the version bump, so they must be Conventional Commits. On GitHub pull requests are rebase-merged and `mbologna/.github`'s `commits.yml` lints every commit; on GitLab merge requests are squash-merged with the title as the subject, and ci-templates' `conventional-title` checks the title.
+`main` is always releasable: work happens on short-lived branches and reaches `main` through a pull or merge request. auto-release reads the subjects of the commits that land for the release-note lines and the version bump, so they must be Conventional Commits. Pull and merge requests merge with a merge commit on every forge, so the linted commits land as they are, and auto-release skips the `Merge …` commit itself; every commit is linted with [commitlint-config](https://github.com/mbologna/commitlint-config) (`mbologna/.github`'s `commits.yml` on GitHub, ci-templates' `commits` component on GitLab).
 
 ### GitHub
 
