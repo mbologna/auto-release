@@ -22,8 +22,9 @@ falls back to the local ones when the fetch fails.
   [maintenance release](#maintenance-releases) when that is due. A
   [fresh rebuild](#fresh-rebuilds) also releases. `docs`, `chore`, `ci`, `test`, `refactor`
   and the rest alone do not release.
-- `security` runs on every push to the default branch and releases only a CVE fix: a
-  `fix(security)` commit, a [base image update](#base-image-updates) that fixes CVEs, or a
+- `security` runs on pushes to the default branch ([which ones](#the-security-strategy)
+  depends on the forge) and releases only a CVE fix: a `fix(security)` commit, a
+  [base image update](#base-image-updates) that fixes CVEs, or a
   [fresh rebuild](#fresh-rebuilds).
 
 ## The version
@@ -37,8 +38,14 @@ bump and the run releases a patch.
 
 ## The security strategy
 
-CI runs `security` on every push to the default branch, so it decides from the commits and
-the Dockerfiles alone. Each of these releases at once.
+CI runs `security` on pushes to the default branch, so it decides from the commits and the
+Dockerfiles alone; each case below releases at once. On GitHub the reusable workflow in
+`mbologna/.github` runs it on every push. On GitLab the `ci-templates` component creates
+the job only when the commit message contains `fix(security)` or the push changes a file
+matching its `security_paths` input (Dockerfiles and dependency manifests by default). A
+merge commit's message lists the merge request's commits when the project's merge commit
+template includes `%{all_commits}`. Any other push creates no job and waits for the
+scheduled run.
 
 ### `fix(security)` commits
 
@@ -106,9 +113,10 @@ builds skip the layer cache; GitLab's kaniko builds never use one), when all of 
 - Findings in language packages (pip, npm, Go modules) are left out: lock files and pinned
   versions make a rebuild produce the same ones.
 
-The `security` strategy checks this on every push, and `commits` and `conventional` on
-each run, so the weekly run releases even when no `feat` or `fix` landed. The notes list
-each expected fix as CVE and package under "Security fixes in the image".
+The `security` strategy checks this on each push it runs on, and `commits` and
+`conventional` on each run, so the weekly run releases even when no `feat` or `fix`
+landed. The notes list each expected fix as CVE and package under "Security fixes in the
+image".
 
 The image has to be matched to its Dockerfile, so the check uses the one Dockerfile in
 `AUTO_RELEASE_DOCKERFILES` that exists at the last tag. With several, or without
