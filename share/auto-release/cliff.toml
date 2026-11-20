@@ -38,6 +38,12 @@ split_commits = false
 protect_breaking_commits = true
 filter_commits = false
 sort_commits = "newest"
+# A wrapped footer line that starts with a URL ("https://…") parses as a new
+# footer whose token is "https", which cut the BREAKING CHANGE description
+# short. Join such a line to the line above it before parsing.
+commit_preprocessors = [
+  { pattern = '([^\n])\n(https?://)', replace = "${1} ${2}" },
+]
 commit_parsers = [
   { message = "^chore\\(release\\)", skip = true },
   { message = "^Merge (branch|pull request|remote-tracking branch) ", skip = true },

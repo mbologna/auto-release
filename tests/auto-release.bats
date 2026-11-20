@@ -284,6 +284,14 @@ next_tag() {
 	printf '%s\n' "$output" | grep -qxF -- '- the feeds move to feeds.example.com; old URLs redirect for a month, then return 404.'
 }
 
+@test "notes: a footer line that starts with a URL stays in the footer" {
+	git tag v1.2.3
+	commit "$(printf 'feat!: serve the feeds on their own host\n\nBREAKING CHANGE: the feeds move to\nhttps://feeds.example.com/<feed>.xml; re-subscribe.')"
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	printf '%s\n' "$output" | grep -qxF -- '- the feeds move to https://feeds.example.com/<feed>.xml; re-subscribe.'
+}
+
 @test "notes: Renovate digest and lock file refreshes are left out" {
 	git tag v1.2.3
 	commit "chore(deps): update action/.github to cebe9d2 (digest) [automerge] (#191)"
