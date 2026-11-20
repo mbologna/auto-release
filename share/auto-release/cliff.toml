@@ -17,7 +17,7 @@ body = """
 {%- if breaking %}
 ### ⚠ Breaking changes
 {% for commit in breaking %}
-- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.breaking_description | default(value=commit.message) | split(pat="\n") | first | trim }}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{% if commit.breaking_description %}{{ commit.breaking_description | replace(from="\n", to=" ") | trim }}{% else %}{{ commit.message | split(pat="\n") | first | trim }}{% endif %}
 {%- endfor %}
 {% endif -%}
 {% for group, commits in commits | group_by(attribute="group") %}

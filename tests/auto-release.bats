@@ -276,6 +276,14 @@ next_tag() {
 	[ "$notes" = "$expected" ]
 }
 
+@test "notes: a BREAKING CHANGE footer wrapped over several lines stays whole" {
+	git tag v1.2.3
+	commit "$(printf 'feat!: serve the feeds on their own host\n\nBREAKING CHANGE: the feeds move to feeds.example.com; old URLs\nredirect for a month, then return 404.')"
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	printf '%s\n' "$output" | grep -qxF -- '- the feeds move to feeds.example.com; old URLs redirect for a month, then return 404.'
+}
+
 @test "notes: Renovate digest and lock file refreshes are left out" {
 	git tag v1.2.3
 	commit "chore(deps): update action/.github to cebe9d2 (digest) [automerge] (#191)"
