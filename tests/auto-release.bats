@@ -1041,6 +1041,23 @@ two_images() {
 	! grep -q worker "$TRIVY_LOG"
 }
 
+@test "rebuild: the tag message names the images a fresh rebuild is for" {
+	export GITLAB_CI=true CI_API_V4_URL=https://gitlab.example.com/api/v4 CI_PROJECT_ID=1
+	export CI_PROJECT_PATH=example/app CI_PROJECT_URL=https://gitlab.example.com/example/app
+	export CI_SERVER_FQDN=gitlab.example.com AUTO_RELEASE_TOKEN=secret
+	export AUTO_RELEASE_PUSH_URL="$BATS_TEST_TMPDIR/remote.git" AUTO_RELEASE_STRATEGY=commits
+	export STUB_VULNS_REF_ghcr_io_example_app_1_2_3="CVE-2026-1 openssl"
+	export STUB_VULNS_REF_ghcr_io_example_app_worker_1_2_3="CVE-2026-8 ffmpeg"
+	two_images
+	run --separate-stderr "$AUTO_RELEASE" release
+	[ "$status" -eq 0 ]
+	[ "$(git for-each-ref --format='%(contents)' refs/tags/v1.2.4)" = "$(printf 'v1.2.4\n\nFresh rebuild: ghcr.io/example/app/worker')" ]
+	commit "fix: correct the retry count"
+	run --separate-stderr "$AUTO_RELEASE" release
+	[ "$status" -eq 0 ]
+	[ "$(git for-each-ref --format='%(contents)' refs/tags/v1.2.5)" = v1.2.5 ]
+}
+
 @test "rebuild: AUTO_RELEASE_IMAGES entries with a tag fail the run" {
 	git tag v1.2.3
 	AUTO_RELEASE_IMAGES="ghcr.io/example/app:latest=Dockerfile" run "$AUTO_RELEASE" plan
@@ -1083,6 +1100,7 @@ two_images() {
 	[ "$status" -eq 0 ]
 	[ "$(git cat-file -t v1.2.4)" = tag ]
 	[[ "$(git cat-file -p v1.2.4)" == *"tagger auto-release <auto-release@localhost>"* ]]
+	[ "$(git for-each-ref --format='%(contents)' refs/tags/v1.2.4)" = "$(printf 'v1.2.4\n\nFresh rebuild: ghcr.io/example/app')" ]
 	[ -n "$(git ls-remote --tags "$BATS_TEST_TMPDIR/remote.git" 'v1.2.4^{}')" ]
 	grep -q '"body":"### Security fixes in the image' "$STUB_LOG"
 	run --separate-stderr "$AUTO_RELEASE" plan
