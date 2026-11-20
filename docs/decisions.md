@@ -40,9 +40,9 @@ bump and the run releases a patch.
 
 ## Upstream pins
 
-A repository built on an upstream records its version in the tag, in one of two ways (the
-[versioning standard](https://github.com/mbologna/.github/blob/main/VERSIONING.md) says
-which applies):
+A repository built on an upstream records its version in the tag, in one of two ways. The
+[versioning standard](https://github.com/mbologna/.github/blob/main/VERSIONING.md) uses
+the first; the second, the distribution packaging convention, isn't SemVer:
 
 - `AUTO_RELEASE_METADATA_CMD`: the command's output becomes SemVer build metadata on the
   version computed above. git-cliff carries the latest tag's metadata over, so the run

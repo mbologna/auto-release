@@ -26,14 +26,16 @@ nothing (push the first tag by hand). The strategy then decides whether a releas
 Any other strategy name fails the run, even before the first tag. A breaking change bumps
 the major, even before 1.0.0, a `feat` the minor and anything else the patch.
 
-Two variables cover repositories built on an upstream, following the
-[versioning standard](https://github.com/mbologna/.github/blob/main/VERSIONING.md):
+Two variables cover repositories built on an upstream:
 
-- `AUTO_RELEASE_METADATA_CMD` prints the pinned upstream version as build metadata:
-  `up2.15.3` makes the next tag `v1.4.0+up2.15.3`. The version still follows the commits.
+- `AUTO_RELEASE_METADATA_CMD` prints the pinned upstream version as SemVer build
+  metadata: `up2.15.3` makes the next tag `v1.4.0+up2.15.3`. The version still follows
+  the commits. This is what the
+  [versioning standard](https://github.com/mbologna/.github/blob/main/VERSIONING.md) uses.
 - `AUTO_RELEASE_UPSTREAM_CMD` prints the upstream version of a patched upstream image:
   tags become `v<upstream>+r<N>` (`v4.5.2+r1`, `v7d1914b5-ls396+r2`), N counting the
-  releases of that upstream version, and the newest such tag is the last release.
+  releases of that upstream version, and the newest such tag is the last release. This
+  is the distribution packaging convention, not SemVer; the standard doesn't use it.
 
 Either way a changed pin releases under `commits` and `conventional`, whatever type the
 commit that moved it had.
