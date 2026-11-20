@@ -114,7 +114,8 @@ matters only for the registry login and the fresh rebuild.
 Trivy reads registry credentials from the Docker config (`~/.docker/config.json` or
 `$DOCKER_CONFIG`) and its usual environment variables. Public base images on Docker Hub,
 `ghcr.io`, `lscr.io` or `registry.gitlab.com` need none. auto-release logs in, with
-`crane auth login`, only to the registry of `AUTO_RELEASE_IMAGE`: on GitLab with the job
+`crane auth login`, only to the registry of `AUTO_RELEASE_IMAGE` or of an image in
+`AUTO_RELEASE_IMAGES`: on GitLab with the job
 token when `CI_REGISTRY` and `CI_JOB_TOKEN` are set, on GitHub with the forge token when the
 image is on `ghcr.io`, and on Forgejo with the forge token when it is on the Forgejo host. A
 failed login logs a warning and the scan runs anonymously.
@@ -149,6 +150,33 @@ The image has to be matched to its Dockerfile, so the check uses the one Dockerf
 `AUTO_RELEASE_DOCKERFILES` that exists at the last tag. With several, or without
 `AUTO_RELEASE_IMAGE`, it is skipped with a log line, as it is when the base image cannot be
 resolved or either image cannot be scanned. A failed scan never fails the run.
+
+### Several images
+
+A repository that builds more than one image, say the application and a helper built
+from a subdirectory, lists them in `AUTO_RELEASE_IMAGES` instead, each with the Dockerfile
+it is built from:
+
+```sh
+AUTO_RELEASE_IMAGES="registry.example.com/app=Dockerfile registry.example.com/app/worker=worker/Dockerfile"
+```
+
+The list replaces `AUTO_RELEASE_IMAGE` and the single-Dockerfile rule above for this check;
+the base image check still reads `AUTO_RELEASE_DOCKERFILES`.
+
+Every image of a release is published with the same tag, so each one is scanned at the
+image tag of the last release tag, and its findings are compared with the final-stage base
+image of its own Dockerfile at that tag. One image with findings a rebuild should fix is
+enough: a release builds them all, and the notes, under "Security fixes in the images",
+name each image with its own list. An image that cannot be checked (its Dockerfile is not
+in the last release, its base cannot be resolved, it or its base cannot be scanned, often
+because that image was never pushed at that tag) is skipped with a log line, and the others
+still count. An entry with a tag or digest fails the run, since the tag comes from the
+release.
+
+Without the list, a quiet stretch with no commits left every image of such a repository on
+the packages of its last build, since the single-image check cannot tell which Dockerfile
+the image comes from.
 
 The age comes from the tag. auto-release has pushed annotated tags since 0.4.0, which
 record when they were made. A lightweight tag counts from its commit's date, which can only

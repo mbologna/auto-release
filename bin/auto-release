@@ -9,6 +9,9 @@
 # Configuration comes from the environment (CI jobs set it from their inputs):
 #   AUTO_RELEASE_STRATEGY            commits (default) | conventional | security
 #   AUTO_RELEASE_IMAGE               image the fresh rebuild scans (GitLab: $CI_REGISTRY_IMAGE)
+#   AUTO_RELEASE_IMAGES              several images the fresh rebuild scans instead, as
+#                                    IMAGE=DOCKERFILE entries separated by spaces or
+#                                    commas (=DOCKERFILE defaults to =Dockerfile)
 #   AUTO_RELEASE_DOCKERFILES         security: Dockerfiles whose base image to compare,
 #                                    separated by spaces or commas (default Dockerfile)
 #   AUTO_RELEASE_REBUILD_DAYS        commits, conventional, security: release a fresh
@@ -552,55 +555,113 @@ release_dockerfile() {
 		found=$df
 	done
 	if [ -n "$several" ]; then
-		log "Fresh rebuild check: several Dockerfiles but one AUTO_RELEASE_IMAGE, which cannot be matched to one of them; skipping"
+		log "Fresh rebuild check: several Dockerfiles but one AUTO_RELEASE_IMAGE, which cannot be matched to one of them (list each image with its Dockerfile in AUTO_RELEASE_IMAGES); skipping"
 		return 1
 	fi
 	[ -n "$found" ] || return 1
 	printf '%s' "$found"
 }
 
+# The images of AUTO_RELEASE_IMAGES, one "IMAGE DOCKERFILE" line each: entries
+# IMAGE=DOCKERFILE separated by spaces or commas, the Dockerfile a path from
+# the repository root, Dockerfile when the entry has none. Every image of a
+# release carries the same tag, so an image reference must not have one.
+rebuild_images() {
+	set -f
+	for entry in $(printf '%s\n' "${AUTO_RELEASE_IMAGES:-}" | tr ',' ' '); do
+		ref=${entry%%=*}
+		case $entry in *=*) df=${entry#*=} ;; *) df=Dockerfile ;; esac
+		case ${ref##*/} in
+		"" | *:* | *@*) die "AUTO_RELEASE_IMAGES: '$entry' is not IMAGE=DOCKERFILE with an image without a tag or digest" ;;
+		esac
+		[ -n "$df" ] || die "AUTO_RELEASE_IMAGES: '$entry' has an empty Dockerfile"
+		printf '%s %s\n' "$ref" "${df#./}"
+	done
+	set +f
+}
+
 # Fresh rebuild: the image of the last release has fixable HIGH/CRITICAL
 # findings in packages its Dockerfile installs (apk add, apt-get install
 # without versions), which a build from scratch picks up once the distribution
 # ships the fix, while nothing in the repository changes to trigger one. A
-# finding counts when it is in an OS package of ${AUTO_RELEASE_IMAGE}:<last
-# version> and not in the final-stage base image at the last tag, whose own
-# fixes need a base image update instead, unless the final stage upgrades its
-# OS packages (apt-get upgrade, apk upgrade): then a rebuild fixes those too,
-# without waiting for the base image's maintainers. Language packages are left out:
-# lock files and pinned versions keep them as they are, so a rebuild would
-# not fix them. Only when the last tag is AUTO_RELEASE_REBUILD_DAYS old, so a
-# fix that is not out yet costs one release per period, not one per run.
-# Sets REBUILD_NOTE. Skips, never failing the run, when anything cannot be
-# resolved or scanned.
+# finding counts when it is in an OS package of the image at the last version
+# and not in the final-stage base image at the last tag, whose own fixes need
+# a base image update instead, unless the final stage upgrades its OS
+# packages (apt-get upgrade, apk upgrade): then a rebuild fixes those too,
+# without waiting for the base image's maintainers. Language packages are left
+# out: lock files and pinned versions keep them as they are, so a rebuild
+# would not fix them. Only when the last tag is AUTO_RELEASE_REBUILD_DAYS old,
+# so a fix that is not out yet costs one release per period, not one per run.
+#
+# The images are AUTO_RELEASE_IMAGES, each with its Dockerfile, else
+# AUTO_RELEASE_IMAGE with the one Dockerfile listed. A release builds every
+# image, so one image with such findings releases. Sets REBUILD_NOTE. An image
+# that cannot be resolved or scanned is skipped, never failing the run.
 rebuild_fixes_cves() {
 	days=$(rebuild_days)
 	[ "$days" -gt 0 ] || return 1
-	df=$(release_dockerfile "$1") || return 1
-	if [ -z "${AUTO_RELEASE_IMAGE:-}" ]; then
-		log "Fresh rebuild check: no AUTO_RELEASE_IMAGE to scan; skipping"
-		return 1
+	if [ -n "${AUTO_RELEASE_IMAGES:-}" ]; then
+		targets=$(rebuild_images)
+		named=true
+	else
+		df=$(release_dockerfile "$1") || return 1
+		if [ -z "${AUTO_RELEASE_IMAGE:-}" ]; then
+			log "Fresh rebuild check: no AUTO_RELEASE_IMAGE to scan; skipping"
+			return 1
+		fi
+		targets="$AUTO_RELEASE_IMAGE $df"
+		named=false
 	fi
 	age=$(($(date +%s) - $(tag_time "$1")))
 	if [ "$age" -lt $((days * 86400)) ]; then
 		log "Fresh rebuild check: $1 is $((age / 86400)) days old, under AUTO_RELEASE_REBUILD_DAYS=$days"
 		return 1
 	fi
-	if ! base=$(git show "$1:./$df" | dockerfile_base); then
-		log "warning: cannot resolve the base image of $df in $1 (an ARG without a default?); skipping the fresh rebuild check"
+	note=""
+	# fd 3, so nothing the scans run reads the list from stdin.
+	while read -r ref df <&3; do
+		image_rebuild_fixes "$1" "$ref" "$df" "$named" || continue
+		log "Fresh rebuild check: $1 is $((age / 86400)) days old and a rebuild of $ref should fix $(printf '%s\n' "$added" | grep -c .) findings"
+		if [ "$named" = true ]; then
+			what="the image \`$ref\`"
+		else
+			what="the image"
+		fi
+		note=$(printf '%s\n\nA fresh build of the packages %s installs on top of its base image is expected to fix these findings of %s:\n\n%s' \
+			"$note" "$what" "$1" "$(printf '%s\n' "$added" | awk '{printf "- %s in `%s`\n", $1, $2}')")
+	done 3<<-EOF
+		$targets
+	EOF
+	[ -n "$note" ] || return 1
+	REBUILD_NOTE=$(printf '%s\n' "$note" | sed -e '/./,$!d')
+}
+
+# One image of the fresh rebuild check: image_rebuild_fixes TAG IMAGE
+# DOCKERFILE NAMED. Sets added to the findings a rebuild should fix, as "CVE
+# package" lines; fails, saying why, when there are none or the image is
+# skipped. NAMED=true names the image in the log lines, for several images.
+image_rebuild_fixes() {
+	image="$2:$(image_tag "$1")" df=$3 added=""
+	skip="the fresh rebuild check"
+	[ "$4" != true ] || skip=$2
+	if ! git cat-file -e "$1:./$df" 2>/dev/null; then
+		log "Fresh rebuild check: $df, which $2 is built from, is not in $1; skipping $2"
 		return 1
 	fi
-	image="${AUTO_RELEASE_IMAGE}:$(image_tag "$1")"
+	if ! base=$(git show "$1:./$df" | dockerfile_base); then
+		log "warning: cannot resolve the base image of $df in $1 (an ARG without a default?); skipping $skip"
+		return 1
+	fi
 	registry_login
 	if ! released=$(image_vulns "$image" os); then
-		log "warning: cannot scan $image; skipping the fresh rebuild check"
+		log "warning: cannot scan $image; skipping $skip"
 		return 1
 	fi
 	from_base=""
 	if git show "$1:./$df" | final_stage_upgrades; then
 		log "Fresh rebuild check: $df upgrades its OS packages, so the base image's findings count too"
 	elif [ -n "$base" ] && ! from_base=$(image_vulns "$base" os); then
-		log "warning: cannot scan $base; skipping the fresh rebuild check"
+		log "warning: cannot scan $base; skipping $skip"
 		return 1
 	fi
 	added=$(printf '%s\n' "$released" | grep -vxF -f "$(printf '%s\n' "$from_base" | tmpfile)" | grep . || true)
@@ -609,8 +670,6 @@ rebuild_fixes_cves() {
 		log "Fresh rebuild check: none in the packages $df installs"
 		return 1
 	fi
-	log "Fresh rebuild check: $1 is $((age / 86400)) days old and a rebuild should fix $(printf '%s\n' "$added" | grep -c .) findings"
-	REBUILD_NOTE=$(printf '%s\n' "$added" | awk '{printf "- %s in `%s`\n", $1, $2}')
 }
 
 # Reads a Dockerfile on stdin; succeeds when its final stage upgrades the OS
@@ -631,11 +690,16 @@ tmpfile() {
 	printf '%s' "$f"
 }
 
+# Logs in to the forge's registry when AUTO_RELEASE_IMAGE or an image of
+# AUTO_RELEASE_IMAGES is on it.
 registry_login() {
 	[ -n "${REGISTRY_LOGIN:-}" ] || return 0
 	registry=${REGISTRY_LOGIN% *} user=${REGISTRY_LOGIN#* }
 	password=${REGISTRY_PASSWORD:-$FORGE_TOKEN}
-	case ${AUTO_RELEASE_IMAGE:-} in "$registry"/*) ;; *) return 0 ;; esac
+	case " ${AUTO_RELEASE_IMAGE:-} $(printf '%s' "${AUTO_RELEASE_IMAGES:-}" | tr ',' ' ') " in
+	*" $registry"/*) ;;
+	*) return 0 ;;
+	esac
 	[ -n "$password" ] || return 0
 	printf '%s' "$password" | crane auth login "$registry" -u "$user" --password-stdin >/dev/null 2>&1 ||
 		log "warning: could not log in to $registry; trying anonymously"
@@ -660,6 +724,7 @@ cliff() {
 plan() {
 	NEEDED=false NEXT_TAG="" SECURITY_NOTE="" REBUILD_NOTE="" MAINTENANCE_NOTE=""
 	rebuild_days >/dev/null
+	rebuild_images >/dev/null
 	maintenance_days >/dev/null
 	whole_days AUTO_RELEASE_MAINTENANCE_DAYS_OVER_BUDGET 28 >/dev/null
 	whole_number AUTO_RELEASE_MINUTES_BUDGET_PCT 85 >/dev/null
@@ -771,14 +836,17 @@ plan() {
 	NOTES_FILE=$(mktemp)
 	{
 		if [ -n "$SECURITY_NOTE$REBUILD_NOTE" ]; then
-			printf '### Security fixes in the image\n\n'
+			if [ "$(rebuild_images | wc -l)" -gt 1 ]; then
+				printf '### Security fixes in the images\n\n'
+			else
+				printf '### Security fixes in the image\n\n'
+			fi
 		fi
 		if [ -n "$SECURITY_NOTE" ]; then
 			printf '%s\n\n' "$SECURITY_NOTE"
 		fi
 		if [ -n "$REBUILD_NOTE" ]; then
-			printf 'A fresh build of the packages the image installs on top of its base image is expected to fix these findings of %s:\n\n%s\n\n' \
-				"$LATEST_TAG" "$REBUILD_NOTE"
+			printf '%s\n\n' "$REBUILD_NOTE"
 		fi
 		if [ -n "$MAINTENANCE_NOTE" ]; then
 			printf '### Maintenance release\n\nRuntime inputs changed since %s:\n\n%s\n\n' "$LATEST_TAG" "$MAINTENANCE_NOTE"
