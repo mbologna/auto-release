@@ -741,8 +741,9 @@ plan() {
 	version=${version%%+*}
 	count=$(git rev-list --count "${LATEST_TAG}..HEAD")
 	log "Commits since $LATEST_TAG: $count"
-	# What the tag records about the upstream: the build metadata (pattern A)
-	# or the upstream version (pattern B), now and at the latest tag. A change
+	# What the tag records about the upstream: the build metadata
+	# (AUTO_RELEASE_METADATA_CMD) or the upstream version (upstream mode), now
+	# and at the latest tag. A change
 	# releases under the commits and conventional strategies, so the tags never
 	# lag behind the pin, whatever type the commit that moved it had.
 	PIN="" LATEST_PIN=""
