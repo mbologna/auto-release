@@ -12,6 +12,6 @@ the [versioning standard](https://github.com/mbologna/.github/blob/main/VERSIONI
   auto-release tags its own releases from the commit types (`feat` minor; `fix`, `perf`,
   `revert` patch; `!` or a `BREAKING CHANGE:` footer major).
 - Write Conventional Commit subjects; they decide the next version.
-- auto-release implements the standard's tag schemes (`AUTO_RELEASE_METADATA_CMD`,
-  `AUTO_RELEASE_UPSTREAM_CMD`). A change to how tags are found, ordered or formed must keep
+- auto-release implements the standard's tag scheme (`AUTO_RELEASE_METADATA_CMD` for the
+  upstream as build metadata). A change to how tags are found, ordered or formed must keep
   `VERSIONING.md` in mbologna/.github true, and is tested in `tests/auto-release.bats`.
