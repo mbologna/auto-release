@@ -7,10 +7,12 @@ code is [`bin/auto-release`](../bin/auto-release); the variables are listed in t
 
 ## The last release
 
-The last release is the highest tag matching `^v[0-9]+\.[0-9]+\.[0-9]+$` by version order.
-Pre-release tags such as `v1.3.0-rc1` are ignored. With no such tag the run logs that and
-does nothing; push the first tag by hand. The run fetches tags from `origin` first and
-falls back to the local ones when the fetch fails.
+The last release is the highest tag matching `vX.Y.Z`, with optional SemVer build metadata
+(`v1.4.0+up2.15.3`), by version order. Pre-release tags such as `v1.3.0-rc1` are ignored.
+With `AUTO_RELEASE_UPSTREAM_CMD` set it is instead the newest tag, by creation date, that
+matches `v<upstream>+r<N>`: an upstream version such as `7d1914b5-ls396` has no order of its
+own. With no such tag the run logs that and does nothing; push the first tag by hand. The
+run fetches tags from `origin` first and falls back to the local ones when the fetch fails.
 
 ## Strategies
 
@@ -35,6 +37,31 @@ anything else the patch. The run always bumps the patch for a maintenance releas
 when no commit landed since the tag (a fresh rebuild). When every
 commit is one git-cliff skips, such as merges or `chore(release)`, git-cliff proposes no
 bump and the run releases a patch.
+
+## Upstream pins
+
+A repository built on an upstream records its version in the tag, in one of two ways (the
+[versioning standard](https://github.com/mbologna/.github/blob/main/VERSIONING.md) says
+which applies):
+
+- `AUTO_RELEASE_METADATA_CMD`: the command's output becomes SemVer build metadata on the
+  version computed above. git-cliff carries the latest tag's metadata over, so the run
+  strips it and appends the current output. Build metadata does not take part in version
+  order, so the repository's own version still orders its releases.
+- `AUTO_RELEASE_UPSTREAM_CMD`: the tag is `v<upstream>+r<N>`, where N is one more than the
+  highest release of that upstream version, or 1 for a new one. Commit types still decide
+  whether to release, but not the tag; a breaking change changes nothing in it.
+
+The command runs in the checkout with `sh -c` and must print one line: build metadata
+identifiers (`[0-9A-Za-z-]`, separated by dots) or, for the upstream, letters, digits, dots
+and hyphens. Anything else fails the run. When the output differs from what the latest tag
+records, which includes the first release after a tag without it, `commits` and
+`conventional` release: a pin bump from Renovate is often a `chore(deps)` commit, and the
+tags should not lag behind it. `security` still releases only a CVE fix.
+
+The image tag of such a release has no `+`, which OCI tags do not allow: `v1.4.0+up2.15.3`
+is image `1.4.0`, and `v4.5.2+r1` is image `4.5.2-r1`. The fresh rebuild check scans
+those tags.
 
 ## The security strategy
 
