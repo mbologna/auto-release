@@ -208,3 +208,9 @@ The image `ghcr.io/mbologna/auto-release` is built from the [`Dockerfile`](Docke
 auto-release releases itself with `conventional` through `docker-ci.yml`'s
 `release_strategy`, and only release tags publish the image.
 
+## Versioning
+
+auto-release follows plain SemVer, as set out in the
+[versioning standard](https://github.com/mbologna/.github/blob/main/VERSIONING.md): it tags
+its own `vX.Y.Z` releases from Conventional Commits, and the image is published as `X.Y.Z`,
+`X.Y` and `latest`. Callers pin the image by version and digest.
