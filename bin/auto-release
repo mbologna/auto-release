@@ -39,11 +39,20 @@
 #   AUTO_RELEASE_DISPATCH_WORKFLOW   workflow file to start on the tag (GitHub defaults
 #                                    to the caller of the running workflow)
 #   AUTO_RELEASE_CONFIG              git-cliff config (default ./cliff.toml, else bundled)
+#   AUTO_RELEASE_METADATA_CMD        shell command printing SemVer build metadata for the
+#                                    tag, e.g. the pinned upstream version (up2.15.3 ->
+#                                    v1.4.0+up2.15.3); a change in it releases a patch
+#   AUTO_RELEASE_UPSTREAM_CMD        shell command printing the upstream version of a
+#                                    patched upstream image: tags become v<upstream>+r<N>,
+#                                    N counting the releases of that upstream version
 #   AUTO_RELEASE_FORGE               github | gitlab | forgejo | none (default: detected)
 #   AUTO_RELEASE_DRY_RUN             true: same as the plan command
 set -eu
 
-TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+$'
+# vX.Y.Z with optional build metadata (v1.4.0+up2.15.3); with
+# AUTO_RELEASE_UPSTREAM_CMD, main switches to v<upstream>+r<N>.
+TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+UPSTREAM_TAG_PATTERN='^v[0-9A-Za-z][0-9A-Za-z.-]*\+r[0-9]+$'
 SHARE_DIR=${AUTO_RELEASE_SHARE_DIR:-$(cd "$(dirname "$0")/../share/auto-release" && pwd)}
 
 log() { printf '%s\n' "$*" >&2; }
@@ -187,8 +196,42 @@ forge_dispatch() {
 
 # --- planning ----------------------------------------------------------------
 
+# Upstream versions need not sort (7d1914b5-ls396), so in upstream mode the
+# newest tag is the latest release.
 latest_tag() {
-	git tag --list 'v*.*.*' --sort=-version:refname | grep -E "$TAG_PATTERN" | head -n 1 || true
+	if [ -n "$UPSTREAM_CMD" ]; then
+		git for-each-ref --sort=-version:refname --sort=-creatordate --format='%(refname:short)' 'refs/tags/v*' |
+			grep -E "$TAG_PATTERN" | head -n 1 || true
+	else
+		git tag --list 'v*.*.*' --sort=-version:refname | grep -E "$TAG_PATTERN" | head -n 1 || true
+	fi
+}
+
+# Runs a configured command (NAME CMD REGEX) in the checkout and prints its
+# output, which must be one line matching REGEX.
+command_value() {
+	out=$(sh -c "$2") || die "$1 failed: $2"
+	if [ "$(printf '%s\n' "$out" | wc -l)" -ne 1 ] || ! printf '%s' "$out" | grep -qE "$3"; then
+		die "$1 printed '$out', which does not match $3"
+	fi
+	printf '%s' "$out"
+}
+
+# The highest release number of upstream version $1 (v$1+rN), or 0.
+upstream_revision() {
+	git tag --list "v$1+r*" | sed -n 's/^v.*+r\([0-9][0-9]*\)$/\1/p' | sort -n | tail -n 1 | grep . || echo 0
+}
+
+# The image tag a release tag publishes: OCI tags have no +, so build metadata
+# is dropped (v1.4.0+up2.15.3 -> 1.4.0) and an upstream release number joins
+# with a hyphen (v4.5.2+r1 -> 4.5.2-r1).
+image_tag() {
+	t=${1#v}
+	if [ -n "$UPSTREAM_CMD" ]; then
+		printf '%s-r%s' "${t%+r*}" "${t##*+r}"
+	else
+		printf '%s' "${t%%+*}"
+	fi
 }
 
 bump() { # VERSION(without v) KIND
@@ -547,7 +590,7 @@ rebuild_fixes_cves() {
 		log "warning: cannot resolve the base image of $df in $1 (an ARG without a default?); skipping the fresh rebuild check"
 		return 1
 	fi
-	image="${AUTO_RELEASE_IMAGE}:${1#v}"
+	image="${AUTO_RELEASE_IMAGE}:$(image_tag "$1")"
 	registry_login
 	if ! released=$(image_vulns "$image" os); then
 		log "warning: cannot scan $image; skipping the fresh rebuild check"
@@ -623,23 +666,45 @@ plan() {
 	whole_number AUTO_RELEASE_MINUTES_QUOTA 400 >/dev/null
 	LATEST_TAG=$(latest_tag)
 	if [ -z "$LATEST_TAG" ]; then
-		log "No vX.Y.Z tag found: push an initial tag by hand to bootstrap. Skipping."
+		log "No release tag matching $TAG_PATTERN found: push an initial tag by hand to bootstrap. Skipping."
 		return 0
 	fi
 	log "Latest tag: $LATEST_TAG"
 	version=${LATEST_TAG#v}
+	version=${version%%+*}
 	count=$(git rev-list --count "${LATEST_TAG}..HEAD")
 	log "Commits since $LATEST_TAG: $count"
+	# What the tag records about the upstream: the build metadata (pattern A)
+	# or the upstream version (pattern B), now and at the latest tag. A change
+	# releases under the commits and conventional strategies, so the tags never
+	# lag behind the pin, whatever type the commit that moved it had.
+	PIN="" LATEST_PIN=""
+	if [ -n "$METADATA_CMD" ]; then
+		PIN=$(command_value AUTO_RELEASE_METADATA_CMD "$METADATA_CMD" '^[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$') || exit 1
+		case $LATEST_TAG in *+*) LATEST_PIN=${LATEST_TAG#*+} ;; esac
+	elif [ -n "$UPSTREAM_CMD" ]; then
+		PIN=$(command_value AUTO_RELEASE_UPSTREAM_CMD "$UPSTREAM_CMD" '^[0-9A-Za-z][0-9A-Za-z.-]*$') || exit 1
+		LATEST_PIN=${LATEST_TAG#v}
+		LATEST_PIN=${LATEST_PIN%+r*}
+	fi
+	pin_changed=false
+	if [ "$PIN" != "$LATEST_PIN" ]; then
+		pin_changed=true
+		log "Upstream pin changed since $LATEST_TAG: ${LATEST_PIN:-none} -> $PIN"
+	fi
 
 	case $STRATEGY in
 	commits)
 		[ "$count" -gt 0 ] && NEEDED=true
+		[ "$pin_changed" = true ] && NEEDED=true
 		if rebuild_fixes_cves "$LATEST_TAG"; then
 			NEEDED=true
 		fi
 		;;
 	conventional)
 		if [ "$count" -gt 0 ] && has_releasable_commits "$LATEST_TAG"; then
+			NEEDED=true
+		elif [ "$pin_changed" = true ]; then
 			NEEDED=true
 		elif [ "$count" -gt 0 ]; then
 			log "No feat/fix/perf/revert or breaking commit since $LATEST_TAG."
@@ -677,19 +742,29 @@ plan() {
 		return 0
 	fi
 
+	# Upstream mode numbers the releases of each upstream version: commit
+	# types decide whether to release, not what the tag is.
+	if [ -n "$UPSTREAM_CMD" ]; then
+		NEXT_TAG="v$PIN+r$(($(upstream_revision "$PIN") + 1))"
 	# A maintenance release has no feat or breaking commit by definition. For
 	# the rest git-cliff applies the Conventional Commit rules; when every
 	# commit is one the config skips (merges, chore(release)) it reports no
 	# bump, and a commit still landed, so release a patch.
-	if [ "$count" -eq 0 ] || [ -n "$MAINTENANCE_NOTE" ]; then
+	elif [ "$count" -eq 0 ] || [ -n "$MAINTENANCE_NOTE" ]; then
 		NEXT_TAG=$(bump "$version" patch)
 	else
+		# git-cliff carries the latest tag's build metadata over; the
+		# current one is appended below.
 		NEXT_TAG=$(cliff --bumped-version)
+		NEXT_TAG=${NEXT_TAG%%+*}
 		case $NEXT_TAG in v*) ;; *) NEXT_TAG=v$NEXT_TAG ;; esac
-		if ! printf '%s' "$NEXT_TAG" | grep -qE "$TAG_PATTERN"; then
+		if ! printf '%s' "$NEXT_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
 			die "git-cliff proposed '$NEXT_TAG', not a vX.Y.Z version"
 		fi
-		[ "$NEXT_TAG" = "$LATEST_TAG" ] && NEXT_TAG=$(bump "$version" patch)
+		[ "$NEXT_TAG" = "v$version" ] && NEXT_TAG=$(bump "$version" patch)
+	fi
+	if [ -n "$METADATA_CMD" ]; then
+		NEXT_TAG="$NEXT_TAG+$PIN"
 	fi
 	log "Next tag: $NEXT_TAG"
 
@@ -715,7 +790,10 @@ plan() {
 				printf 'Base image:\n```\n%s\n```\n\n' "$base"
 			fi
 		fi
-		notes=$(cliff --unreleased --tag "$NEXT_TAG" --strip all)
+		# The range, not --unreleased: git-cliff picks the latest tag by
+		# sorting names, which upstream versions such as 7d1914b5-ls396
+		# don't follow.
+		notes=$(cliff "${LATEST_TAG}..HEAD" --tag "$NEXT_TAG" --strip all)
 		notes=$(printf '%s\n' "$notes" | sed -e '/./,$!d')
 		if [ -n "$notes" ]; then
 			printf '%s\n' "$notes"
@@ -725,7 +803,9 @@ plan() {
 			printf 'No notable changes since %s.\n' "$LATEST_TAG"
 		fi
 		if [ -n "$COMPARE_URL" ]; then
-			printf '\n**Full changelog:** %s%s...%s\n' "$COMPARE_URL" "$LATEST_TAG" "$NEXT_TAG"
+			# A + in a URL path is literal, but forges route it unevenly.
+			printf '\n**Full changelog:** %s%s...%s\n' "$COMPARE_URL" \
+				"$(printf '%s' "$LATEST_TAG" | sed 's/+/%2B/g')" "$(printf '%s' "$NEXT_TAG" | sed 's/+/%2B/g')"
 		fi
 	} >"$NOTES_FILE"
 }
@@ -811,6 +891,12 @@ main() {
 	# Checked here as well as in plan, so a wrong name fails even where plan
 	# stops early (no tag yet, a tag ref).
 	case $STRATEGY in commits | conventional | security) ;; *) die "unknown strategy '$STRATEGY' (commits, conventional or security)" ;; esac
+	METADATA_CMD=${AUTO_RELEASE_METADATA_CMD:-}
+	UPSTREAM_CMD=${AUTO_RELEASE_UPSTREAM_CMD:-}
+	if [ -n "$METADATA_CMD" ] && [ -n "$UPSTREAM_CMD" ]; then
+		die "AUTO_RELEASE_METADATA_CMD and AUTO_RELEASE_UPSTREAM_CMD exclude each other"
+	fi
+	[ -z "$UPSTREAM_CMD" ] || TAG_PATTERN=$UPSTREAM_TAG_PATTERN
 	FORGE=$(detect_forge)
 	case $FORGE in github | gitlab | forgejo | none) ;; *) die "unknown forge '$FORGE'" ;; esac
 	# A release run on a tag ref is the tag build it dispatched itself, and
