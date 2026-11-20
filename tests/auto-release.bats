@@ -195,6 +195,151 @@ next_tag() {
 	[ "$next" = v1.3.0 ]
 }
 
+@test "metadata: the tag carries the command's output as build metadata" {
+	export AUTO_RELEASE_METADATA_CMD='echo up2.15.3'
+	git tag v1.2.3
+	commit "fix: a"
+	next_tag
+	[ "$next" = v1.2.4+up2.15.3 ]
+}
+
+@test "metadata: build metadata tags are releases, ordered by their version" {
+	git tag v2.1.1
+	commit "feat: a"
+	git tag v3.0.0+up2.15.3
+	commit "feat: b"
+	export AUTO_RELEASE_METADATA_CMD='echo up2.15.3'
+	next_tag
+	[ "$next" = v3.1.0+up2.15.3 ]
+	# Without the command the metadata is dropped, not carried over.
+	unset AUTO_RELEASE_METADATA_CMD
+	next_tag
+	[ "$next" = v3.1.0 ]
+}
+
+@test "metadata: a breaking commit bumps the major, with the current metadata" {
+	echo 2.15.3 >pin
+	git add pin
+	commit "chore: pin"
+	git tag v3.0.0+up2.15.3
+	echo 2.16.0 >pin
+	git add pin
+	commit "feat(deps)!: update rancher to 2.16.0"
+	export AUTO_RELEASE_METADATA_CMD='printf up%s "$(cat pin)"'
+	next_tag
+	[ "$next" = v4.0.0+up2.16.0 ]
+}
+
+@test "metadata: a change releases a patch even when no commit would" {
+	export AUTO_RELEASE_STRATEGY=conventional AUTO_RELEASE_METADATA_CMD='printf up%s "$(cat pin)"'
+	echo 2.15.3 >pin
+	git add pin
+	commit "chore: pin"
+	git tag v1.0.0+up2.15.3
+	commit "chore(deps): update a dev tool"
+	next_tag
+	[ "$next" = none ]
+	echo 2.15.4 >pin
+	git add pin
+	commit "chore(deps): update rancher to 2.15.4"
+	next_tag
+	[ "$next" = v1.0.1+up2.15.4 ]
+	# The first tagged release after a plain tag counts as a change too.
+	git tag -d v1.0.0+up2.15.3 >/dev/null
+	git tag v1.0.0 HEAD~2
+	next_tag
+	[ "$next" = v1.0.1+up2.15.4 ]
+}
+
+@test "metadata: output that is not build metadata fails, and so does the command" {
+	git tag v1.2.3
+	commit "fix: a"
+	AUTO_RELEASE_METADATA_CMD='echo "up 2"' run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -ne 0 ]
+	[[ "$stderr" == *"does not match"* ]]
+	AUTO_RELEASE_METADATA_CMD='printf "up1\nup2"' run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -ne 0 ]
+	AUTO_RELEASE_METADATA_CMD='false' run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -ne 0 ]
+	[[ "$stderr" == *"AUTO_RELEASE_METADATA_CMD failed"* ]]
+}
+
+@test "metadata and upstream commands exclude each other" {
+	git tag v1.2.3
+	AUTO_RELEASE_METADATA_CMD='echo up1' AUTO_RELEASE_UPSTREAM_CMD='echo 1.0.0' run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -ne 0 ]
+	[[ "$stderr" == *"exclude each other"* ]]
+}
+
+@test "upstream: releases of one upstream version count up, a new version starts at r1" {
+	export AUTO_RELEASE_STRATEGY=conventional AUTO_RELEASE_UPSTREAM_CMD='cat upstream'
+	echo 4.5.2 >upstream
+	git add upstream
+	commit "chore: pin"
+	git tag v1.1.0
+	old_tag v4.5.2+r1 2
+	commit "fix: patch the reconnect"
+	next_tag
+	[ "$next" = v4.5.2+r2 ]
+	commit "feat!: breaking commits do not change the scheme"
+	next_tag
+	[ "$next" = v4.5.2+r2 ]
+	echo 4.5.3 >upstream
+	git add upstream
+	commit "chore(deps): update thelounge to 4.5.3"
+	next_tag
+	[ "$next" = v4.5.3+r1 ]
+}
+
+@test "upstream: release numbers compare as numbers" {
+	export AUTO_RELEASE_UPSTREAM_CMD='echo 4.5.2'
+	old_tag v4.5.2+r9 3
+	commit "fix: a"
+	old_tag v4.5.2+r10 2
+	commit "fix: b"
+	next_tag
+	[ "$next" = v4.5.2+r11 ]
+}
+
+@test "upstream: a version that does not sort is fine, the newest tag is the latest" {
+	export AUTO_RELEASE_UPSTREAM_CMD='cat upstream'
+	echo 7d1914b5-ls396 >upstream
+	git add upstream
+	commit "chore: pin"
+	old_tag v7d1914b5-ls396+r1 5
+	echo 1bf7b9f6-ls402 >upstream
+	git add upstream
+	commit "chore(deps): update lazylibrarian to 1bf7b9f6-ls402"
+	old_tag v1bf7b9f6-ls402+r1 2
+	commit "fix: a"
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$stderr" == *"Latest tag: v1bf7b9f6-ls402+r1"* ]]
+	[[ "$output" == "## v1bf7b9f6-ls402+r2"* ]]
+	[[ "$output" == *"- a ("* ]]
+	[[ "$output" != *"update lazylibrarian"* ]]
+}
+
+@test "upstream: semver tags do not count, so the first release is pushed by hand" {
+	export AUTO_RELEASE_UPSTREAM_CMD='echo 4.5.2'
+	git tag v1.1.10
+	commit "fix: a"
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$stderr" == *"push an initial tag"* ]]
+	[ -z "$output" ]
+}
+
+@test "upstream: output that is not a version fails" {
+	git tag v4.5.2+r1
+	commit "fix: a"
+	AUTO_RELEASE_UPSTREAM_CMD='echo 4.5.2+r1' run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -ne 0 ]
+	[[ "$stderr" == *"does not match"* ]]
+	AUTO_RELEASE_UPSTREAM_CMD='true' run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -ne 0 ]
+}
+
 @test "conventional: docs, chore and ci alone do not release" {
 	export AUTO_RELEASE_STRATEGY=conventional
 	git tag v1.2.3
@@ -376,6 +521,21 @@ next_tag() {
 	grep -qx 'released=true' "$GITHUB_OUTPUT"
 	grep -qx 'tag=v1.3.0' "$GITHUB_OUTPUT"
 	grep -q '^## Released v1.3.0' "$GITHUB_STEP_SUMMARY"
+}
+
+@test "github: a + in the tag is pushed, released and dispatched as is" {
+	export GITHUB_ACTIONS=true GITHUB_REPOSITORY=example/app GITHUB_TOKEN=secret
+	export GITHUB_WORKFLOW_REF="example/app/.github/workflows/ci.yml@refs/heads/main"
+	export AUTO_RELEASE_PUSH_URL="$BATS_TEST_TMPDIR/remote.git"
+	export AUTO_RELEASE_UPSTREAM_CMD='echo 4.5.2'
+	git tag v4.5.2+r1
+	commit "fix: a"
+	run --separate-stderr "$AUTO_RELEASE" release
+	[ "$status" -eq 0 ]
+	[ -n "$(git ls-remote --tags "$BATS_TEST_TMPDIR/remote.git" 'v4.5.2+r2')" ]
+	grep -q '{"tag_name":"v4.5.2+r2"' "$STUB_LOG"
+	grep -q 'compare/v4.5.2%2Br1...v4.5.2%2Br2' "$STUB_LOG"
+	grep -q '/dispatches {"ref":"v4.5.2+r2"}' "$STUB_LOG"
 }
 
 @test "github: AUTO_RELEASE_DISPATCH=false skips the tag build" {
@@ -658,6 +818,22 @@ next_tag() {
 	[[ "$output" == *"No commits since v1.2.3."* ]]
 	grep -qx ghcr.io/example/app:1.2.3 "$TRIVY_LOG"
 	grep -qx alpine:3.24.3 "$TRIVY_LOG"
+}
+
+@test "rebuild: the image tag of a release tag has no +" {
+	export AUTO_RELEASE_STRATEGY=security AUTO_RELEASE_IMAGE=ghcr.io/example/app
+	export STUB_VULNS_3_24_3=""
+	dockerfile 'FROM alpine:3.24.3' 'RUN apk add --no-cache curl'
+	commit "feat: add a Dockerfile"
+	old_tag v4.5.2+r3
+	AUTO_RELEASE_UPSTREAM_CMD='echo 4.5.2' run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	grep -qx ghcr.io/example/app:4.5.2-r3 "$TRIVY_LOG"
+	git tag -d v4.5.2+r3 >/dev/null
+	old_tag v1.2.3+up2.15.3
+	AUTO_RELEASE_METADATA_CMD='echo up2.15.3' run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	grep -qx ghcr.io/example/app:1.2.3 "$TRIVY_LOG"
 }
 
 @test "rebuild: findings the base image has too do not release" {
