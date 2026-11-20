@@ -164,6 +164,7 @@ Every variable the script reads; "detected" and "set by CI" values come from the
 | `AUTO_RELEASE_METADATA_CMD` | unset | shell command, run in the checkout, whose one-line output is the tag's SemVer build metadata (`up2.15.3` → `v1.4.0+up2.15.3`); a change in it releases at least a patch |
 | `AUTO_RELEASE_UPSTREAM_CMD` | unset | shell command whose one-line output is the upstream version of a patched upstream image; tags become `v<upstream>+r<N>`. Excludes `AUTO_RELEASE_METADATA_CMD` |
 | `AUTO_RELEASE_IMAGE` | GitLab: `$CI_REGISTRY_IMAGE` | image without a tag: the fresh rebuild scans it, and the registry login is for its registry |
+| `AUTO_RELEASE_IMAGES` | unset | several images the fresh rebuild scans instead of `AUTO_RELEASE_IMAGE`, separated by spaces or commas, each `IMAGE=DOCKERFILE`: the image without a tag and the Dockerfile it is built from, a path from the repository root (`Dockerfile` when left out); one image with findings a rebuild fixes releases |
 | `AUTO_RELEASE_DOCKERFILES` | `Dockerfile` | Dockerfiles whose final base image `security` compares, separated by spaces or commas; missing ones are skipped |
 | `AUTO_RELEASE_SEVERITY` | `HIGH,CRITICAL` | Trivy severities the base image and fresh rebuild checks count |
 | `AUTO_RELEASE_REBUILD_DAYS` | `7` | age of the last tag at which a fresh rebuild may release; `0` turns it off |

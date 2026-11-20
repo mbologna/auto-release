@@ -42,7 +42,8 @@ Some releases start with a section that does not come from the commits:
 - The `security` strategy lists the CVEs a base image update fixed under "Security fixes in
   the image", one line per CVE and package.
 - A fresh rebuild lists, in the same section, the findings of the last release's image that
-  a fresh build is expected to fix.
+  a fresh build is expected to fix. With `AUTO_RELEASE_IMAGES` the section is "Security fixes
+  in the images", and each image with such findings gets its own list under its name.
 - A maintenance release starts with "Maintenance release" and the runtime inputs that
   changed since the last tag. Its `chore(deps)` commits appear under Dependencies as usual.
 - When `AUTO_RELEASE_BASE_IMAGE_PATTERN` is set, the matching lines of the root
