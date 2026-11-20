@@ -174,6 +174,17 @@ next_tag() {
 	[ "$next" = v1.2.4 ]
 }
 
+@test "commits: after a release of only skipped commits, more of them still release the next patch" {
+	git tag v1.2.0
+	commit "feat: a"
+	git tag v1.3.0
+	commit "chore(deps): update action/.github to 7db69c6 (digest)"
+	git tag v1.3.1
+	commit "chore(deps): update docker/php to eacc0d9 (digest)"
+	next_tag
+	[ "$next" = v1.3.2 ]
+}
+
 @test "no commits since the tag: no release" {
 	git tag v1.2.3
 	next_tag

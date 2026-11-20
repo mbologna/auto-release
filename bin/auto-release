@@ -247,6 +247,15 @@ bump() { # VERSION(without v) KIND
 	esac
 }
 
+# version_above A B: whether version A (X.Y.Z, without v) is above B.
+version_above() {
+	awk -v a="$1" -v b="$2" 'BEGIN {
+		split(a, x, "."); split(b, y, ".")
+		for (i = 1; i <= 3; i++) if (x[i] + 0 != y[i] + 0) exit !(x[i] + 0 > y[i] + 0)
+		exit 1
+	}'
+}
+
 # conventional: only commits that change the version for a user count, the same
 # set release-please releases for. docs/chore/ci/test/refactor alone do not.
 has_releasable_commits() {
@@ -829,7 +838,12 @@ plan() {
 		if ! printf '%s' "$NEXT_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
 			die "git-cliff proposed '$NEXT_TAG', not a vX.Y.Z version"
 		fi
-		[ "$NEXT_TAG" = "v$version" ] && NEXT_TAG=$(bump "$version" patch)
+		# git-cliff bumps from the last release it has notes for. When every
+		# commit since the last tag is one the config skips (digest updates,
+		# merges), and the release before was such a release too, that is an
+		# older tag, so its proposal is the latest version or below it: release
+		# a patch instead.
+		version_above "${NEXT_TAG#v}" "$version" || NEXT_TAG=$(bump "$version" patch)
 	fi
 	if [ -n "$METADATA_CMD" ]; then
 		NEXT_TAG="$NEXT_TAG+$PIN"
