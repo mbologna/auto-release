@@ -174,6 +174,19 @@ because that image was never pushed at that tag) is skipped with a log line, and
 still count. An entry with a tag or digest fails the run, since the tag comes from the
 release.
 
+A build that reuses the images whose inputs did not change since the last release, rather
+than building every image, would skip exactly the images a fresh rebuild is for. So the
+release tag's message names them, one line each after the tag:
+
+```text
+v1.2.4
+
+Fresh rebuild: registry.example.com/app/worker
+```
+
+On GitLab the tag pipeline reads the message as `CI_COMMIT_TAG_MESSAGE`, and ci-templates'
+`kaniko-build` builds a listed image even when nothing it builds from changed.
+
 Without the list, a quiet stretch with no commits left every image of such a repository on
 the packages of its last build, since the single-image check cannot tell which Dockerfile
 the image comes from.
@@ -209,7 +222,8 @@ days when the namespace's CI minutes run short; see [ci-minutes.md](ci-minutes.m
 ## Releasing
 
 `auto-release release` creates an annotated, unsigned tag (a job container without a git
-identity tags as `auto-release <auto-release@localhost>`), pushes it, creates the Release
+identity tags as `auto-release <auto-release@localhost>`) whose message is the tag, followed
+by a `Fresh rebuild: IMAGE` line for each image a fresh rebuild is due for, pushes it, creates the Release
 and, on GitHub and Forgejo, dispatches the tag build with `workflow_dispatch`. A tag pushed
 with GitHub's `GITHUB_TOKEN` starts no workflow run, and Forgejo's automatic token behaves
 the same way, so the dispatch is what builds the tag. The workflow is
