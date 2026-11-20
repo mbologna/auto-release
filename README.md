@@ -26,19 +26,12 @@ nothing (push the first tag by hand). The strategy then decides whether a releas
 Any other strategy name fails the run, even before the first tag. A breaking change bumps
 the major, even before 1.0.0, a `feat` the minor and anything else the patch.
 
-Two variables cover repositories built on an upstream:
-
-- `AUTO_RELEASE_METADATA_CMD` prints the pinned upstream version as SemVer build
-  metadata: `up2.15.3` makes the next tag `v1.4.0+up2.15.3`. The version still follows
-  the commits. This is what the
-  [versioning standard](https://github.com/mbologna/.github/blob/main/VERSIONING.md) uses.
-- `AUTO_RELEASE_UPSTREAM_CMD` prints the upstream version of a patched upstream image:
-  tags become `v<upstream>+r<N>` (`v4.5.2+r1`, `v7d1914b5-ls396+r2`), N counting the
-  releases of that upstream version, and the newest such tag is the last release. This
-  is the distribution packaging convention, not SemVer; the standard doesn't use it.
-
-Either way a changed pin releases under `commits` and `conventional`, whatever type the
-commit that moved it had.
+A repository built on an upstream sets `AUTO_RELEASE_METADATA_CMD`, which prints the
+pinned upstream version as SemVer build metadata: `up2.15.3` makes the next tag
+`v1.4.0+up2.15.3`, as the
+[versioning standard](https://github.com/mbologna/.github/blob/main/VERSIONING.md)
+describes. The version still follows the commits, and a changed pin releases under
+`commits` and `conventional`, whatever type the commit that moved it had.
 `auto-release release` pushes an annotated tag, creates the Release and, on GitHub and
 Forgejo, starts the tag build. `auto-release plan` prints the version and notes and changes
 nothing.
@@ -164,7 +157,6 @@ Every variable the script reads; "detected" and "set by CI" values come from the
 | `AUTO_RELEASE_DISPATCH_WORKFLOW` | file named in `GITHUB_WORKFLOW_REF` | workflow file to start on the new tag; with neither, the dispatch is skipped |
 | `AUTO_RELEASE_CONFIG` | `./cliff.toml`, else the bundled one | git-cliff config |
 | `AUTO_RELEASE_METADATA_CMD` | unset | shell command, run in the checkout, whose one-line output is the tag's SemVer build metadata (`up2.15.3` → `v1.4.0+up2.15.3`); a change in it releases at least a patch |
-| `AUTO_RELEASE_UPSTREAM_CMD` | unset | shell command whose one-line output is the upstream version of a patched upstream image; tags become `v<upstream>+r<N>`. Excludes `AUTO_RELEASE_METADATA_CMD` |
 | `AUTO_RELEASE_IMAGE` | GitLab: `$CI_REGISTRY_IMAGE` | image without a tag: the fresh rebuild scans it, and the registry login is for its registry |
 | `AUTO_RELEASE_IMAGES` | unset | several images the fresh rebuild scans instead of `AUTO_RELEASE_IMAGE`, separated by spaces or commas, each `IMAGE=DOCKERFILE`: the image without a tag and the Dockerfile it is built from, a path from the repository root (`Dockerfile` when left out); one image with findings a rebuild fixes releases |
 | `AUTO_RELEASE_DOCKERFILES` | `Dockerfile` | Dockerfiles whose final base image `security` compares, separated by spaces or commas; missing ones are skipped |

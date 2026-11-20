@@ -278,80 +278,12 @@ next_tag() {
 	[[ "$stderr" == *"AUTO_RELEASE_METADATA_CMD failed"* ]]
 }
 
-@test "metadata and upstream commands exclude each other" {
+@test "the removed upstream command fails and says what replaced it" {
 	git tag v1.2.3
-	AUTO_RELEASE_METADATA_CMD='echo up1' AUTO_RELEASE_UPSTREAM_CMD='echo 1.0.0' run --separate-stderr "$AUTO_RELEASE" plan
+	commit "fix: a"
+	AUTO_RELEASE_UPSTREAM_CMD='echo 4.5.2' run --separate-stderr "$AUTO_RELEASE" plan
 	[ "$status" -ne 0 ]
-	[[ "$stderr" == *"exclude each other"* ]]
-}
-
-@test "upstream: releases of one upstream version count up, a new version starts at r1" {
-	export AUTO_RELEASE_STRATEGY=conventional AUTO_RELEASE_UPSTREAM_CMD='cat upstream'
-	echo 4.5.2 >upstream
-	git add upstream
-	commit "chore: pin"
-	git tag v1.1.0
-	old_tag v4.5.2+r1 2
-	commit "fix: patch the reconnect"
-	next_tag
-	[ "$next" = v4.5.2+r2 ]
-	commit "feat!: breaking commits do not change the scheme"
-	next_tag
-	[ "$next" = v4.5.2+r2 ]
-	echo 4.5.3 >upstream
-	git add upstream
-	commit "chore(deps): update thelounge to 4.5.3"
-	next_tag
-	[ "$next" = v4.5.3+r1 ]
-}
-
-@test "upstream: release numbers compare as numbers" {
-	export AUTO_RELEASE_UPSTREAM_CMD='echo 4.5.2'
-	old_tag v4.5.2+r9 3
-	commit "fix: a"
-	old_tag v4.5.2+r10 2
-	commit "fix: b"
-	next_tag
-	[ "$next" = v4.5.2+r11 ]
-}
-
-@test "upstream: a version that does not sort is fine, the newest tag is the latest" {
-	export AUTO_RELEASE_UPSTREAM_CMD='cat upstream'
-	echo 7d1914b5-ls396 >upstream
-	git add upstream
-	commit "chore: pin"
-	old_tag v7d1914b5-ls396+r1 5
-	echo 1bf7b9f6-ls402 >upstream
-	git add upstream
-	commit "chore(deps): update syncthing to 1bf7b9f6-ls402"
-	old_tag v1bf7b9f6-ls402+r1 2
-	commit "fix: a"
-	run --separate-stderr "$AUTO_RELEASE" plan
-	[ "$status" -eq 0 ]
-	[[ "$stderr" == *"Latest tag: v1bf7b9f6-ls402+r1"* ]]
-	[[ "$output" == "## v1bf7b9f6-ls402+r2"* ]]
-	[[ "$output" == *"- a ("* ]]
-	[[ "$output" != *"update syncthing"* ]]
-}
-
-@test "upstream: semver tags do not count, so the first release is pushed by hand" {
-	export AUTO_RELEASE_UPSTREAM_CMD='echo 4.5.2'
-	git tag v1.1.10
-	commit "fix: a"
-	run --separate-stderr "$AUTO_RELEASE" plan
-	[ "$status" -eq 0 ]
-	[[ "$stderr" == *"push an initial tag"* ]]
-	[ -z "$output" ]
-}
-
-@test "upstream: output that is not a version fails" {
-	git tag v4.5.2+r1
-	commit "fix: a"
-	AUTO_RELEASE_UPSTREAM_CMD='echo 4.5.2+r1' run --separate-stderr "$AUTO_RELEASE" plan
-	[ "$status" -ne 0 ]
-	[[ "$stderr" == *"does not match"* ]]
-	AUTO_RELEASE_UPSTREAM_CMD='true' run --separate-stderr "$AUTO_RELEASE" plan
-	[ "$status" -ne 0 ]
+	[[ "$stderr" == *"removed in 2.0.0"*"AUTO_RELEASE_METADATA_CMD"* ]]
 }
 
 @test "conventional: docs, chore and ci alone do not release" {
@@ -541,15 +473,15 @@ next_tag() {
 	export GITHUB_ACTIONS=true GITHUB_REPOSITORY=example/app GITHUB_TOKEN=secret
 	export GITHUB_WORKFLOW_REF="example/app/.github/workflows/ci.yml@refs/heads/main"
 	export AUTO_RELEASE_PUSH_URL="$BATS_TEST_TMPDIR/remote.git"
-	export AUTO_RELEASE_UPSTREAM_CMD='echo 4.5.2'
-	git tag v4.5.2+r1
+	export AUTO_RELEASE_METADATA_CMD='echo up2.15.3'
+	git tag v1.2.3+up2.15.3
 	commit "fix: a"
 	run --separate-stderr "$AUTO_RELEASE" release
 	[ "$status" -eq 0 ]
-	[ -n "$(git ls-remote --tags "$BATS_TEST_TMPDIR/remote.git" 'v4.5.2+r2')" ]
-	grep -q '{"tag_name":"v4.5.2+r2"' "$STUB_LOG"
-	grep -q 'compare/v4.5.2%2Br1...v4.5.2%2Br2' "$STUB_LOG"
-	grep -q '/dispatches {"ref":"v4.5.2+r2"}' "$STUB_LOG"
+	[ -n "$(git ls-remote --tags "$BATS_TEST_TMPDIR/remote.git" 'v1.2.4+up2.15.3')" ]
+	grep -q '{"tag_name":"v1.2.4+up2.15.3"' "$STUB_LOG"
+	grep -q 'compare/v1.2.3%2Bup2.15.3...v1.2.4%2Bup2.15.3' "$STUB_LOG"
+	grep -q '/dispatches {"ref":"v1.2.4+up2.15.3"}' "$STUB_LOG"
 }
 
 @test "github: AUTO_RELEASE_DISPATCH=false skips the tag build" {
@@ -839,11 +771,6 @@ next_tag() {
 	export STUB_VULNS_3_24_3=""
 	dockerfile 'FROM alpine:3.24.3' 'RUN apk add --no-cache curl'
 	commit "feat: add a Dockerfile"
-	old_tag v4.5.2+r3
-	AUTO_RELEASE_UPSTREAM_CMD='echo 4.5.2' run --separate-stderr "$AUTO_RELEASE" plan
-	[ "$status" -eq 0 ]
-	grep -qx ghcr.io/example/app:4.5.2-r3 "$TRIVY_LOG"
-	git tag -d v4.5.2+r3 >/dev/null
 	old_tag v1.2.3+up2.15.3
 	AUTO_RELEASE_METADATA_CMD='echo up2.15.3' run --separate-stderr "$AUTO_RELEASE" plan
 	[ "$status" -eq 0 ]
