@@ -617,11 +617,12 @@ rebuild_fixes_cves() {
 		log "Fresh rebuild check: $1 is $((age / 86400)) days old, under AUTO_RELEASE_REBUILD_DAYS=$days"
 		return 1
 	fi
-	note=""
+	note="" rebuilt=""
 	# fd 3, so nothing the scans run reads the list from stdin.
 	while read -r ref df <&3; do
 		image_rebuild_fixes "$1" "$ref" "$df" "$named" || continue
 		log "Fresh rebuild check: $1 is $((age / 86400)) days old and a rebuild of $ref should fix $(printf '%s\n' "$added" | grep -c .) findings"
+		rebuilt=$(printf '%s\n%s' "$rebuilt" "$ref")
 		if [ "$named" = true ]; then
 			what="the image \`$ref\`"
 		else
@@ -634,6 +635,7 @@ rebuild_fixes_cves() {
 	EOF
 	[ -n "$note" ] || return 1
 	REBUILD_NOTE=$(printf '%s\n' "$note" | sed -e '/./,$!d')
+	REBUILD_IMAGES=$(printf '%s\n' "$rebuilt" | grep .)
 }
 
 # One image of the fresh rebuild check: image_rebuild_fixes TAG IMAGE
@@ -722,7 +724,7 @@ cliff() {
 
 # Sets NEEDED, NEXT_TAG, NOTES_FILE.
 plan() {
-	NEEDED=false NEXT_TAG="" SECURITY_NOTE="" REBUILD_NOTE="" MAINTENANCE_NOTE=""
+	NEEDED=false NEXT_TAG="" SECURITY_NOTE="" REBUILD_NOTE="" REBUILD_IMAGES="" MAINTENANCE_NOTE=""
 	rebuild_days >/dev/null
 	rebuild_images >/dev/null
 	maintenance_days >/dev/null
@@ -896,6 +898,17 @@ report() {
 	fi
 }
 
+# The annotated tag's message: the tag, then one "Fresh rebuild: IMAGE" line
+# for each image a fresh rebuild is due for. A build that reuses the images
+# whose inputs did not change (GitLab's CI_COMMIT_TAG_MESSAGE) reads it to
+# rebuild those anyway.
+tag_message() {
+	printf '%s\n' "$NEXT_TAG"
+	[ -n "$REBUILD_IMAGES" ] || return 0
+	printf '\n'
+	printf '%s\n' "$REBUILD_IMAGES" | sed 's/^/Fresh rebuild: /'
+}
+
 release() {
 	[ -n "$FORGE_TOKEN" ] || die "no token: set AUTO_RELEASE_TOKEN (GitHub and Forgejo also take GITHUB_TOKEN)"
 	# Annotated, so the tag records when it was made (the fresh rebuild
@@ -903,7 +916,7 @@ release() {
 	# says. A job container often has no git identity: fall back to one.
 	git var GIT_COMMITTER_IDENT >/dev/null 2>&1 ||
 		set -- -c user.name=auto-release -c user.email=auto-release@localhost
-	git "$@" -c tag.gpgSign=false -c tag.forceSignAnnotated=false tag -a -m "$NEXT_TAG" "$NEXT_TAG"
+	git "$@" -c tag.gpgSign=false -c tag.forceSignAnnotated=false tag -a -F "$(tag_message | tmpfile)" "$NEXT_TAG"
 	if ! out=$(git push --quiet "$PUSH_URL" "refs/tags/${NEXT_TAG}" 2>&1); then
 		printf '%s\n' "$out" | sed "s|${FORGE_TOKEN}|***|g" >&2
 		die "pushing $NEXT_TAG failed"
