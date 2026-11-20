@@ -16,7 +16,7 @@ setup() {
 	unset GITHUB_ACTIONS GITLAB_CI FORGEJO_ACTIONS GITEA_ACTIONS GITHUB_OUTPUT GITHUB_STEP_SUMMARY
 	unset GITHUB_REF CI_COMMIT_TAG
 	unset AUTO_RELEASE_STRATEGY AUTO_RELEASE_IMAGE AUTO_RELEASE_TOKEN AUTO_RELEASE_DRY_RUN
-	unset AUTO_RELEASE_DOCKERFILES AUTO_RELEASE_REBUILD_DAYS
+	unset AUTO_RELEASE_DOCKERFILES AUTO_RELEASE_REBUILD_DAYS AUTO_RELEASE_IMAGES
 	unset AUTO_RELEASE_MAINTENANCE_DAYS AUTO_RELEASE_RUNTIME_PATHS AUTO_RELEASE_MAINTENANCE_DAYS_OVER_BUDGET
 	unset AUTO_RELEASE_MINUTES_BUDGET_PCT AUTO_RELEASE_MINUTES_QUOTA AUTO_RELEASE_TODAY
 	unset CI_MINUTES_TOKEN CI_SERVER_URL CI_API_GRAPHQL_URL
@@ -49,10 +49,13 @@ setup() {
 		# after the last colon (the digest for IMAGE:TAG@sha256:...), other
 		# characters than letters and digits turned into _. A finding is in an
 		# OS package unless a third word names its class ("CVE pkg lang-pkgs").
-		# Logs each image.
+		# STUB_VULNS_REF_<IMAGE:TAG>, the whole reference so turned, wins over
+		# the tag, for images released with the same tag. Logs each image.
 		for last; do :; done
 		printf '%s\n' "$last" >>"$TRIVY_LOG"
-		tag=$(printf '%s' "${last##*:}" | tr -c 'A-Za-z0-9' _)
+		tag=REF_$(printf '%s' "$last" | tr -c 'A-Za-z0-9' _)
+		eval "set -- \${STUB_VULNS_$tag+x}"
+		[ -n "${1:-}" ] || tag=$(printf '%s' "${last##*:}" | tr -c 'A-Za-z0-9' _)
 		eval "set -- \${STUB_VULNS_$tag+x}"
 		[ -n "${1:-}" ] || { echo "image not found" >&2; exit 1; }
 		eval "v=\$STUB_VULNS_$tag"
@@ -955,6 +958,96 @@ next_tag() {
 	[ -z "$output" ]
 	[[ "$stderr" == *"several Dockerfiles but one AUTO_RELEASE_IMAGE"* ]]
 	[ ! -s "$TRIVY_LOG" ]
+}
+
+# Two images released with the same tag: app from Dockerfile, worker from
+# worker/Dockerfile, both on alpine:3.24.3.
+two_images() {
+	export AUTO_RELEASE_IMAGES="ghcr.io/example/app=Dockerfile, ghcr.io/example/app/worker=worker/Dockerfile"
+	export STUB_VULNS_3_24_3="CVE-2026-1 openssl"
+	dockerfile 'FROM alpine:3.24.3' 'RUN apk add --no-cache curl'
+	DOCKERFILE=worker/Dockerfile dockerfile 'FROM alpine:3.24.3' 'RUN apk add --no-cache ffmpeg'
+	commit "feat: add the images"
+	old_tag v1.2.3
+}
+
+@test "rebuild: several images, one with findings a rebuild fixes, release and name it" {
+	export AUTO_RELEASE_STRATEGY=commits
+	export STUB_VULNS_REF_ghcr_io_example_app_1_2_3="CVE-2026-1 openssl"
+	export STUB_VULNS_REF_ghcr_io_example_app_worker_1_2_3="CVE-2026-1 openssl;CVE-2026-8 ffmpeg"
+	two_images
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$output" == "## v1.2.4"* ]]
+	[[ "$output" == *"### Security fixes in the images"* ]]
+	[[ "$output" == *'packages the image `ghcr.io/example/app/worker` installs on top of its base image is expected to fix these findings of v1.2.3'* ]]
+	[[ "$output" == *'- CVE-2026-8 in `ffmpeg`'* ]]
+	[[ "$output" != *'the image `ghcr.io/example/app` installs'* ]]
+	[[ "$output" != *"CVE-2026-1"* ]]
+	grep -qx ghcr.io/example/app:1.2.3 "$TRIVY_LOG"
+	grep -qx ghcr.io/example/app/worker:1.2.3 "$TRIVY_LOG"
+	[[ "$stderr" == *"a rebuild of ghcr.io/example/app/worker should fix 1 findings"* ]]
+}
+
+@test "rebuild: several images with findings each get their own list" {
+	export AUTO_RELEASE_STRATEGY=security
+	export STUB_VULNS_REF_ghcr_io_example_app_1_2_3="CVE-2026-5 curl"
+	export STUB_VULNS_REF_ghcr_io_example_app_worker_1_2_3="CVE-2026-8 ffmpeg"
+	two_images
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$output" == "## v1.2.4"* ]]
+	[[ "$output" == *'the image `ghcr.io/example/app` installs on top of its base image is expected to fix these findings of v1.2.3:'*'- CVE-2026-5 in `curl`'*'the image `ghcr.io/example/app/worker` installs'*'- CVE-2026-8 in `ffmpeg`'* ]]
+}
+
+@test "rebuild: several images without findings a rebuild fixes do not release" {
+	export AUTO_RELEASE_STRATEGY=commits
+	export STUB_VULNS_REF_ghcr_io_example_app_1_2_3="CVE-2026-1 openssl"
+	export STUB_VULNS_REF_ghcr_io_example_app_worker_1_2_3=""
+	two_images
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+	[[ "$stderr" == *"none in the packages Dockerfile installs"* ]]
+	[[ "$stderr" == *"none in the packages worker/Dockerfile installs"* ]]
+	[ "$(grep -c . "$TRIVY_LOG")" -eq 4 ]
+}
+
+@test "rebuild: an image of several that is missing is skipped, the others still count" {
+	export AUTO_RELEASE_STRATEGY=commits
+	export STUB_VULNS_REF_ghcr_io_example_app_1_2_3="CVE-2026-5 curl"
+	two_images
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$stderr" == *"warning: cannot scan ghcr.io/example/app/worker:1.2.3; skipping ghcr.io/example/app/worker"* ]]
+	[[ "$output" == "## v1.2.4"* ]]
+	[[ "$output" == *'- CVE-2026-5 in `curl`'* ]]
+	[[ "$output" != *"worker"* ]]
+}
+
+@test "rebuild: an image whose Dockerfile is not in the last version is skipped" {
+	export AUTO_RELEASE_STRATEGY=commits
+	export AUTO_RELEASE_IMAGES="ghcr.io/example/app ghcr.io/example/app/worker=./worker/Dockerfile"
+	export STUB_VULNS_1_2_3="CVE-2026-5 curl" STUB_VULNS_3_24_3=""
+	dockerfile 'FROM alpine:3.24.3' 'RUN apk add --no-cache curl'
+	commit "feat: add a Dockerfile"
+	old_tag v1.2.3
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$stderr" == *"worker/Dockerfile, which ghcr.io/example/app/worker is built from, is not in v1.2.3; skipping ghcr.io/example/app/worker"* ]]
+	[[ "$output" == "## v1.2.4"* ]]
+	[[ "$output" == *"### Security fixes in the images"* ]]
+	[[ "$output" == *'the image `ghcr.io/example/app` installs'* ]]
+	! grep -q worker "$TRIVY_LOG"
+}
+
+@test "rebuild: AUTO_RELEASE_IMAGES entries with a tag fail the run" {
+	git tag v1.2.3
+	AUTO_RELEASE_IMAGES="ghcr.io/example/app:latest=Dockerfile" run "$AUTO_RELEASE" plan
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"AUTO_RELEASE_IMAGES: 'ghcr.io/example/app:latest=Dockerfile' is not IMAGE=DOCKERFILE"* ]]
+	AUTO_RELEASE_IMAGES="registry.example.com:5000/app=Dockerfile" run "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
 }
 
 @test "rebuild: the scheduled conventional run releases without feat or fix commits" {
