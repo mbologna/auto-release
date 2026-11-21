@@ -210,6 +210,11 @@ a `feat` or `fix`. A `conventional` run with commits since the last tag but no `
   maintenance release a week, and a repository whose runtime inputs did not change never
   rebuilds.
 
+Both day gates (this one and the fresh rebuild's) allow half a day. Scheduled runs start late,
+and by a different amount each week: GitHub has started the Monday 06:00 UTC run anywhere
+between 12:00 and 15:20. Counted to the second, a run that started earlier than last week's
+found the tag "6 days old" and pushed the release back a whole week.
+
 On GitLab the period can stretch to `AUTO_RELEASE_MAINTENANCE_DAYS_OVER_BUDGET` (default 28)
 days when the namespace's CI minutes run short; see [ci-minutes.md](ci-minutes.md). The
 `security` strategy never waits for this.
