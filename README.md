@@ -82,8 +82,8 @@ jobs:
     uses: mbologna/.github/.github/workflows/auto-release.yml@<sha> # main
     with:
       strategy: conventional  # or commits
-      # optional: dockerfiles, image, base_image_pattern, dispatch_tag_build: false,
-      # dispatch_workflow: publish.yml, dry_run: true
+      # optional: dockerfiles, image, images, base_image_pattern, metadata_command,
+      # dispatch_tag_build: false, dispatch_workflow: publish.yml, dry_run: true
 ```
 
 The workflow gates itself, so the caller needs no `if:`: it runs on the schedule, and on a
@@ -101,11 +101,12 @@ Include the `auto-release` component of
 
 ```yaml
 include:
-  - component: gitlab.com/mbologna/ci-templates/auto-release@8.1.0
+  - component: gitlab.com/mbologna/ci-templates/auto-release@9.0.0
     inputs:
       strategy: conventional  # or commits
       # dockerfiles: "...", maintenance_days: 7, runtime_paths: "...", minutes_budget_pct: 85,
-      # security_paths: [...], image: "...", base_image_pattern: "...", dry_run: true
+      # security_paths: [...], image: "...", images: [...], base_image_pattern: "...",
+      # metadata_command: "...", dry_run: true
 ```
 
 Add a pipeline schedule on `main` with cron `0 6 * * 1` (UTC); its "Run now" releases at
