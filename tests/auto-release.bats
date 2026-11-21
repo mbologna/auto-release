@@ -1069,6 +1069,17 @@ two_images() {
 	[[ "$stderr" == *"runtime inputs changed, but v1.2.3 is 6 days old, under 7 days"* ]]
 }
 
+@test "maintenance: a weekly run that starts a few hours earlier than last week's still releases" {
+	export AUTO_RELEASE_STRATEGY=conventional
+	# Last week's scheduled run started at 15:00, this week's at 09:00.
+	GIT_COMMITTER_DATE="$(($(date +%s) - 7 * 86400 + 6 * 3600)) +0000" git tag -a -m v1.2.3 v1.2.3
+	touch_commit "chore(deps): update requests from 2.32.0 to 2.33.0" uv.lock
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[[ "$output" == "## v1.2.4"* ]]
+	[[ "$stderr" == *"Maintenance release: v1.2.3 is 7 days old and runtime inputs changed"* ]]
+}
+
 @test "maintenance: a runtime change at the threshold releases a patch, listing the updates" {
 	export AUTO_RELEASE_STRATEGY=conventional
 	old_tag v1.2.3 7
