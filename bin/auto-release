@@ -509,18 +509,18 @@ maintenance_due() {
 		return 1
 	fi
 	age=$(($(date +%s) - $(tag_time "$1")))
-	if [ "$age" -lt $((days * 86400)) ]; then
-		log "Maintenance release: runtime inputs changed, but $1 is $((age / 86400)) days old, under $days days"
+	if ! old_enough "$age" "$days"; then
+		log "Maintenance release: runtime inputs changed, but $1 is $(age_days "$age") days old, under $days days"
 		return 1
 	fi
 	# On GitLab every release build costs CI minutes: past the budget, wait
 	# the longer period. The query runs only when its answer matters.
 	slow=$(whole_days AUTO_RELEASE_MAINTENANCE_DAYS_OVER_BUDGET 28)
-	if [ "$FORGE" = gitlab ] && [ "$age" -lt $((slow * 86400)) ] && minutes_over_budget; then
-		log "Maintenance release: CI minutes over budget, so it waits $slow days; $1 is $((age / 86400)) days old"
+	if [ "$FORGE" = gitlab ] && ! old_enough "$age" "$slow" && minutes_over_budget; then
+		log "Maintenance release: CI minutes over budget, so it waits $slow days; $1 is $(age_days "$age") days old"
 		return 1
 	fi
-	log "Maintenance release: $1 is $((age / 86400)) days old and runtime inputs changed"
+	log "Maintenance release: $1 is $(age_days "$age") days old and runtime inputs changed"
 	MAINTENANCE_NOTE=$(printf '%s\n' "$changed" | sort -u | awk '{printf "- `%s`\n", $0}')
 }
 
@@ -528,6 +528,20 @@ maintenance_due() {
 # pushes, or the commit date of a lightweight one, which can only be earlier.
 tag_time() {
 	git for-each-ref --format='%(creatordate:unix)' "refs/tags/$1"
+}
+
+# Whether a release AGE seconds old has reached a gate of DAYS. Scheduled runs
+# start late, by a different amount each week (GitHub's Monday 06:00 UTC run
+# has started anywhere from 12:00 to 15:20), so a gate counted to the second
+# made a weekly run that started earlier than last week's wait a whole extra
+# week. Half a day of slack keeps a 7-day gate weekly.
+old_enough() {
+	[ "$1" -ge $(($2 * 86400 - 43200)) ]
+}
+
+# AGE seconds in whole days, rounded the way old_enough counts them.
+age_days() {
+	echo $((($1 + 43200) / 86400))
 }
 
 # The Dockerfile AUTO_RELEASE_IMAGE is built from: the only listed one that
@@ -600,15 +614,15 @@ rebuild_fixes_cves() {
 		named=false
 	fi
 	age=$(($(date +%s) - $(tag_time "$1")))
-	if [ "$age" -lt $((days * 86400)) ]; then
-		log "Fresh rebuild check: $1 is $((age / 86400)) days old, under AUTO_RELEASE_REBUILD_DAYS=$days"
+	if ! old_enough "$age" "$days"; then
+		log "Fresh rebuild check: $1 is $(age_days "$age") days old, under AUTO_RELEASE_REBUILD_DAYS=$days"
 		return 1
 	fi
 	note="" rebuilt=""
 	# fd 3, so nothing the scans run reads the list from stdin.
 	while read -r ref df <&3; do
 		image_rebuild_fixes "$1" "$ref" "$df" "$named" || continue
-		log "Fresh rebuild check: $1 is $((age / 86400)) days old and a rebuild of $ref should fix $(printf '%s\n' "$added" | grep -c .) findings"
+		log "Fresh rebuild check: $1 is $(age_days "$age") days old and a rebuild of $ref should fix $(printf '%s\n' "$added" | grep -c .) findings"
 		rebuilt=$(printf '%s\n%s' "$rebuilt" "$ref")
 		if [ "$named" = true ]; then
 			what="the image \`$ref\`"
