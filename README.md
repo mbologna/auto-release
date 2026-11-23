@@ -11,6 +11,9 @@ schedule without a release pull request. The notes live only in the forge's Rele
 nothing is committed back to the default branch, so the job needs no branch-protection
 bypass.
 
+[docs/decisions.md](docs/decisions.md#why-not-an-existing-tool) says why no existing
+release tool replaces it.
+
 ## How a run decides
 
 The last release is the highest `vX.Y.Z` tag, build metadata included (`v1.4.0+up2.15.3`);

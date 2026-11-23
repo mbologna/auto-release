@@ -240,3 +240,25 @@ and releases are cut from branches, so that run must not tag again.
 
 On GitHub, the run writes `released` and `tag` to `GITHUB_OUTPUT` and the notes to the job
 summary.
+
+## Why not an existing tool
+
+- [release-please](https://github.com/googleapis/release-please) (releases from Conventional
+  Commits) runs on GitHub only and sends every release through a release pull request that
+  commits a CHANGELOG. Its tags can't carry SemVer build metadata
+  ([googleapis/release-please#2825](https://github.com/googleapis/release-please/issues/2825)).
+- [semantic-release](https://github.com/semantic-release/semantic-release) (releases from
+  commit messages) can't find earlier tags that carry build metadata when `tagFormat` is
+  dynamic
+  ([semantic-release/semantic-release#2355](https://github.com/semantic-release/semantic-release/issues/2355)).
+- [python-semantic-release](https://github.com/python-semantic-release/python-semantic-release)
+  (the same idea in Python) tags and creates Releases on GitHub and GitLab, with
+  `--build-metadata`. It has nothing for the Trivy-driven releases (the `security` strategy
+  and fresh rebuilds), maintenance releases, a release when only the metadata command's
+  output changes, dispatching the tag build, or the CI minutes throttle.
+- [commitizen](https://github.com/commitizen-tools/commitizen) (version bumps from commits)
+  always commits the version bump, and creates no forge Release.
+- [git-cliff](https://git-cliff.org/) (changelog generator) writes the notes and the next
+  version, and auto-release uses it for both, but it doesn't tag or release.
+
+Checked 2026-11-23.
