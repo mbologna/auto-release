@@ -58,7 +58,7 @@ jobs:
       attestations: write
       security-events: write
       actions: write
-    uses: mbologna/.github/.github/workflows/docker-ci.yml@074693c8ed17163910daa587c82c02a2cd9451d7 # main
+    uses: mbologna/.github/.github/workflows/docker-ci.yml@698761bc5a4c53f01bfc6c2303da576418c8ec04 # main
     with:
       image_name: auto-release
       # Only release tags publish the image (auto-release dispatches
