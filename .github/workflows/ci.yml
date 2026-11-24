@@ -48,16 +48,13 @@ jobs:
 
   docker:
     needs: test
-    # contents: the release tag and its Release; actions: dispatch the tag
-    # build (a tag pushed with GITHUB_TOKEN triggers no run); the rest:
-    # push, sign and scan the image.
+    # Build, push, sign and scan the image; the auto-release job below releases.
     permissions:
-      contents: write
+      contents: read
       packages: write
       id-token: write
       attestations: write
       security-events: write
-      actions: write
     uses: mbologna/.github/.github/workflows/docker-ci.yml@d17b76ff2f8404153bf1fa08e875e6972b046c09 # main
     with:
       image_name: auto-release
@@ -71,7 +68,20 @@ jobs:
       allow_root: >-
         CI job image: GitHub's container: and GitLab's image: run the job
         as the image's user, which writes the checked-out workspace
-      # auto-release runs inside docker-ci: Monday's schedule releases with
-      # this strategy, a push to main only a CVE fix.
-      release_strategy: conventional
     secrets: inherit
+
+  # Monday's schedule tags vX.Y.Z when a feat, fix, perf, revert or breaking commit
+  # landed (or a maintenance release for dependency updates), a push to main tags
+  # only a CVE fix; it dispatches the tag build that publishes the X.Y.Z image.
+  auto-release:
+    needs: [test, docker]
+    # contents: push the tag and create the Release; actions: dispatch the tag
+    # build (a tag pushed with GITHUB_TOKEN triggers no run).
+    permissions:
+      contents: write
+      actions: write
+    uses: mbologna/.github/.github/workflows/auto-release.yml@d17b76ff2f8404153bf1fa08e875e6972b046c09 # main
+    with:
+      strategy: conventional
+      image: ghcr.io/mbologna/auto-release
+      dockerfiles: Dockerfile
