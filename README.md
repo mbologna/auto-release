@@ -65,9 +65,9 @@ skips the `Merge …` commit itself. Every commit is linted with
 The reusable workflow
 [`auto-release.yml`](https://github.com/mbologna/.github/blob/main/.github/workflows/auto-release.yml)
 in `mbologna/.github` runs the image as a [GitHub Actions](https://docs.github.com/actions)
-job container. A repository that builds its image with `mbologna/.github`'s
-`docker-ci.yml` sets its `release_strategy` input, which calls `auto-release.yml` after
-the build; others call `auto-release.yml` directly:
+job container. The caller runs it as a job of its own; a repository that builds its image
+with `mbologna/.github`'s `docker-ci.yml` makes the job need that build, and the build job
+itself needs only `contents: read`:
 
 ```yaml
 "on":
@@ -204,8 +204,9 @@ and pushes tags to a local bare repository. Run `bats tests/` (needs
 
 The image `ghcr.io/mbologna/auto-release` is built from the [`Dockerfile`](Dockerfile), on
 [Alpine Linux](https://alpinelinux.org/) with crane, curl, git, git-cliff, jq and Trivy.
-auto-release releases itself with `conventional` through `docker-ci.yml`'s
-`release_strategy`, and only release tags publish the image.
+auto-release releases itself with `conventional` from the `auto-release` job of its
+[`ci.yml`](.github/workflows/ci.yml), after the tests and the image build, and only release
+tags publish the image.
 
 ## Versioning
 
