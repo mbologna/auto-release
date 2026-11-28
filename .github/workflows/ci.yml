@@ -55,7 +55,7 @@ jobs:
       id-token: write
       attestations: write
       security-events: write
-    uses: mbologna/.github/.github/workflows/docker-ci.yml@ea61923970085662e217bf6e40c26d98185a0b42 # main
+    uses: mbologna/.github/.github/workflows/docker-ci.yml@9f87ecddca50363e8e60d1c3f22edc1bfb10e762 # main
     with:
       image_name: auto-release
       # Only release tags publish the image (auto-release dispatches
@@ -80,7 +80,7 @@ jobs:
     permissions:
       contents: write
       actions: write
-    uses: mbologna/.github/.github/workflows/auto-release.yml@ea61923970085662e217bf6e40c26d98185a0b42 # main
+    uses: mbologna/.github/.github/workflows/auto-release.yml@9f87ecddca50363e8e60d1c3f22edc1bfb10e762 # main
     with:
       strategy: conventional
       image: ghcr.io/mbologna/auto-release
