@@ -56,7 +56,7 @@ any other change waits for Monday.
 merge request. auto-release reads the subjects of the commits that land for the notes and
 the version bump, so they must be Conventional Commits. Pull and merge requests merge with
 a merge commit on every forge, so the linted commits land as they are, and auto-release
-skips the `Merge …` commit itself. Every commit is linted with
+skips the merge commit itself. Every commit is linted with
 [commitlint-config](https://github.com/mbologna/commitlint-config) (`mbologna/.github`'s
 `commits.yml` on GitHub, ci-templates' `commits` component on GitLab).
 

@@ -718,7 +718,14 @@ cliff_config() {
 	fi
 }
 
+# Merge commits since the latest tag stay out of the notes and the bump, whatever
+# their subject: the config skips the forges' "Merge ..." subjects, but Renovate
+# titles the merge commits of the pull requests it merges after the pull request
+# ("chore(deps): update x (#12)"), which listed every update twice.
 cliff() {
+	for merge in $(git rev-list --merges "${LATEST_TAG}..HEAD"); do
+		set -- "$@" --skip-commit "$merge"
+	done
 	AUTO_RELEASE_COMMIT_URL=$COMMIT_URL NO_COLOR=1 GIT_CLIFF_OFFLINE=true \
 		git-cliff --config "$(cliff_config)" --tag-pattern "$TAG_PATTERN" "$@"
 }

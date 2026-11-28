@@ -322,6 +322,20 @@ next_tag() {
 	done
 }
 
+@test "notes: a merge commit titled like its pull request is listed once" {
+	git tag v1.2.3
+	git checkout -q -b renovate/x
+	commit "chore(deps): update x from 1.0.0 to 1.0.1 (patch)"
+	git checkout -q main
+	git merge -q --no-ff -m "chore(deps): update x from 1.0.0 to 1.0.1 (patch) (#12)" renovate/x
+	commit "fix: name the limit"
+	run --separate-stderr "$AUTO_RELEASE" plan
+	[ "$status" -eq 0 ]
+	[ "$(printf '%s\n' "$output" | grep -c 'update x from 1.0.0 to 1.0.1')" -eq 1 ]
+	! printf '%s\n' "$output" | grep -q '(#12)'
+	printf '%s\n' "$output" | grep -q '^## v1.2.4$'
+}
+
 @test "notes: grouped by type, breaking changes first, merges and releases skipped" {
 	git tag v1.2.3
 	commit "feat(api): add the ETA endpoint"

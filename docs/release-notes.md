@@ -25,10 +25,12 @@ the new one.
 
 ## What the notes leave out
 
-- Merge commits: subjects starting `Merge branch`, `Merge pull request` or
-  `Merge remote-tracking branch`, which covers the merge commits GitHub, GitLab and Forgejo
-  create. Pull and merge requests merge with a merge commit on every forge, so the commits
-  of the request appear individually. The `conventional` and `security` checks read
+- Merge commits, whatever their subject: the forges title theirs `Merge branch …` or
+  `Merge pull request …`, but Renovate titles the merge commits of the pull requests it
+  merges after the pull request, which listed every update twice. auto-release passes each
+  merge commit since the latest tag to git-cliff as `--skip-commit`, so a repository's own
+  `cliff.toml` skips them too. Pull and merge requests merge with a merge commit on every
+  forge, so the commits of the request appear individually. The `conventional` and `security` checks read
   `git log --no-merges` for the same reason.
 - `chore(release)` commits.
 - Renovate digest pins and lock-file refreshes: `(deps)` commits ending in `(digest)` or
